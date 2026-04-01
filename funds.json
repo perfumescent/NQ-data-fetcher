@@ -1,0 +1,219 @@
+{
+    "etf": [
+        {
+            "code": "159660",
+            "name": "汇添富",
+            "fee": 0.0065,
+            "trackingError": null,
+            "inceptionDate": null
+        },
+        {
+            "code": "513390",
+            "name": "博时",
+            "fee": 0.0065,
+            "trackingError": null,
+            "inceptionDate": null
+        },
+        {
+            "code": "159501",
+            "name": "嘉实",
+            "fee": 0.006,
+            "trackingError": null,
+            "inceptionDate": null
+        },
+        {
+            "code": "159696",
+            "name": "易方达",
+            "fee": 0.006,
+            "trackingError": null,
+            "inceptionDate": null
+        },
+        {
+            "code": "513300",
+            "name": "华夏",
+            "fee": 0.008,
+            "inceptionDate": "2020-10-22",
+            "trackingError": null
+        },
+        {
+            "code": "159659",
+            "name": "招商",
+            "fee": 0.0065,
+            "trackingError": null,
+            "inceptionDate": null
+        },
+        {
+            "code": "159632",
+            "name": "华安",
+            "fee": 0.008,
+            "trackingError": null,
+            "inceptionDate": null
+        },
+        {
+            "code": "513110",
+            "name": "华泰柏瑞",
+            "fee": 0.01,
+            "trackingError": null,
+            "inceptionDate": null
+        },
+        {
+            "code": "513870",
+            "name": "富国",
+            "fee": 0.006,
+            "trackingError": null,
+            "inceptionDate": null
+        },
+        {
+            "code": "159513",
+            "name": "大成",
+            "fee": 0.01,
+            "trackingError": null,
+            "inceptionDate": null
+        },
+        {
+            "code": "159509",
+            "name": "景顺长城纳科",
+            "fee": 0.006,
+            "trackingError": null,
+            "inceptionDate": null
+        }
+    ],
+    "fund": [
+        {
+            "code": "270042",
+            "name": "广发纳指联接A",
+            "fee": 0.01,
+            "trackingError": 0.0109,
+            "quota": "10",
+            "inceptionDate": null
+        },
+        {
+            "code": "000834",
+            "name": "大成纳指联接A",
+            "fee": 0.01,
+            "trackingError": 0.0153,
+            "quota": "10",
+            "inceptionDate": null
+        },
+        {
+            "code": "016055",
+            "name": "博时纳指联接A",
+            "fee": 0.0065,
+            "trackingError": 0.0155,
+            "quota": "暂停",
+            "inceptionDate": null
+        },
+        {
+            "code": "018043",
+            "name": "天弘纳指A",
+            "fee": 0.006,
+            "trackingError": 0.0157,
+            "quota": "50",
+            "inceptionDate": null
+        },
+        {
+            "code": "161130",
+            "name": "易方达纳指联接A",
+            "fee": 0.006,
+            "trackingError": 0.0159,
+            "quota": "10",
+            "inceptionDate": null
+        },
+        {
+            "code": "019736",
+            "name": "宝盈纳指发起A",
+            "fee": 0.0065,
+            "trackingError": 0.0158,
+            "quota": "10",
+            "inceptionDate": null
+        },
+        {
+            "code": "016532",
+            "name": "嘉实纳指A",
+            "fee": 0.006,
+            "trackingError": 0.0167,
+            "quota": "100",
+            "inceptionDate": null
+        },
+        {
+            "code": "016452",
+            "name": "南方纳指发起A",
+            "fee": 0.0065,
+            "trackingError": 0.0167,
+            "quota": "50",
+            "inceptionDate": null
+        },
+        {
+            "code": "019172",
+            "name": "摩根纳指A",
+            "fee": 0.006,
+            "trackingError": 0.0185,
+            "quota": "100",
+            "inceptionDate": null
+        },
+        {
+            "code": "019441",
+            "name": "万家纳指A",
+            "fee": 0.0065,
+            "trackingError": 0.0183,
+            "quota": "10",
+            "inceptionDate": null
+        },
+        {
+            "code": "019524",
+            "name": "华泰柏瑞纳指A",
+            "fee": 0.0065,
+            "trackingError": 0.0191,
+            "quota": "100",
+            "inceptionDate": null
+        },
+        {
+            "code": "539001",
+            "name": "建信纳指A",
+            "fee": 0.01,
+            "trackingError": 0.0211,
+            "quota": "暂停",
+            "inceptionDate": null
+        },
+        {
+            "code": "019547",
+            "name": "招商纳指A",
+            "fee": 0.0065,
+            "trackingError": 0.02,
+            "quota": "100",
+            "inceptionDate": null
+        },
+        {
+            "code": "040046",
+            "name": "华安纳指联接A",
+            "fee": 0.008,
+            "trackingError": 0.0204,
+            "quota": "10",
+            "inceptionDate": null
+        },
+        {
+            "code": "018966",
+            "name": "汇添富纳指A",
+            "fee": 0.0065,
+            "trackingError": 0.0223,
+            "quota": "100",
+            "inceptionDate": null
+        },
+        {
+            "code": "015299",
+            "name": "华夏纳指联接A",
+            "fee": 0.008,
+            "trackingError": 0.0274,
+            "quota": "暂停",
+            "inceptionDate": null
+        },
+        {
+            "code": "160213",
+            "name": "国泰纳指100",
+            "fee": 0.01,
+            "trackingError": 0.008,
+            "quota": "暂停",
+            "inceptionDate": null
+        }
+    ]
+}

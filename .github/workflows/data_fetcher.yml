@@ -1,0 +1,44 @@
+name: Data Fetcher Cron
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # Every hour (actual scheduling handled inside the job)
+    
+  workflow_dispatch:      # Enable manual trigger from GitHub Actions tab
+
+jobs:
+  run-fetcher:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75   # Safety timeout: 1 hour loop + buffer for setup
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Run Data Fetcher (loop 12 times, ~5 min apart)
+        env:
+          REMOTE_API_URL: ${{ secrets.REMOTE_API_URL }}
+          RUN_ONCE: "1"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          for i in {1..20}; do
+            echo "=== Run $i/20 started at $(date '+%Y-%m-%d %H:%M:%S') ==="
+            uv run --python 3.13 src/main.py
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "✅ Run $i/20 succeeded at $(date '+%Y-%m-%d %H:%M:%S')"
+            else
+              echo "❌ Run $i/20 failed at $(date '+%Y-%m-%d %H:%M:%S') (exit code $EXIT_CODE)"
+            fi
+            if [ $i -lt 20 ]; then
+              sleep 200
+            fi
+          done
