@@ -1,19 +1,66 @@
 import concurrent.futures
-import json
-import os
+from typing import List
 from src.services.assemblers import IndexAssembler, ETFAssembler, FundAssembler
-from src.domain.models import UnifiedMarketData
+from src.domain.models import UnifiedMarketData, ETFData, FundData
+from src.providers.api_server_client import APIServerClient
 
 class JobScheduler:
     @staticmethod
     def _load_config():
-        try:
-            # Structure: scripts/data_fetcher/funds.json
-            path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../funds.json"))
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            return {}
+        """
+        从 api_server 拉取基金配置（GET /v1/internal/fund-configs）。
+        api_server 不可达或 DB 未配置时自动 fallback 到本地 funds.json。
+        """
+        return APIServerClient.get_fund_configs()
+
+    @staticmethod
+    def extract_fund_list_data(data: UnifiedMarketData, today: str) -> dict:
+        """
+        从已组装的 UnifiedMarketData 中提取基金列表字段，构造推送 payload。
+
+        不需要额外调用外部 API — 所有字段已在 fetch_all_jobs() 中组装好。
+
+        Args:
+            data: fetch_all_jobs() 的返回值
+            today: 日期字符串 "YYYY-MM-DD"
+
+        Returns:
+            {"date": "YYYY-MM-DD", "etf": [...], "fund": [...]}
+        """
+        etf_items = []
+        for etf in data.etfs:
+            etf_items.append({
+                "code": etf.symbol,
+                "name": etf.displayName,
+                "lastPrice": etf.price,
+                "changePct": etf.changePct,
+                "premiumRate": etf.premiumRate,
+                "yearChange": etf.yearChange,
+                "sixMonthChange": etf.sixMonthChange,
+                "fee": etf.fee,
+                "inceptionDate": etf.inceptionDate,
+                "volume": etf.turnoverAmount,    # 原始值（元）
+                "fundSize": etf.fundSize,         # 原始值（亿元）
+                "trackingError": None,
+            })
+
+        fund_items = []
+        for fund in data.funds:
+            fund_items.append({
+                "code": fund.symbol,
+                "name": fund.displayName,
+                "lastPrice": fund.price,
+                "changePct": fund.changePct,
+                "yearChange": fund.yearChange,
+                "sixMonthChange": fund.sixMonthChange,
+                "fee": fund.fee,
+                "inceptionDate": fund.inceptionDate,
+                "fundSize": fund.fundSize,
+                "quota": fund.quota,
+                "trackingError": fund.trackingError,
+            })
+
+        return {"date": today, "etf": etf_items, "fund": fund_items}
 
     @staticmethod
     def fetch_all_jobs() -> UnifiedMarketData:
