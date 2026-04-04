@@ -10,11 +10,14 @@ data_fetcher 与 api_server 通信的 HTTP 客户端。
 
 import json
 import os
+from urllib.parse import urlparse
 
 import requests
 
-# api_server 根地址，生产环境需通过环境变量覆盖
-_API_SERVER_BASE = os.getenv("API_SERVER_BASE_URL", "http://localhost:8000")
+# 从 REMOTE_API_URL 提取 base（与 main.py 共用同一个环境变量）
+_remote = os.getenv("REMOTE_API_URL", "http://localhost:8000/v1/internal/ingest")
+_parsed = urlparse(_remote)
+_API_SERVER_BASE = f"{_parsed.scheme}://{_parsed.netloc}"
 _FUND_CONFIGS_URL = f"{_API_SERVER_BASE}/v1/internal/fund-configs"
 _FUND_DATA_STATUS_URL = f"{_API_SERVER_BASE}/v1/internal/fund-data/status"
 _FUND_DATA_INGEST_URL = f"{_API_SERVER_BASE}/v1/internal/fund-data"
