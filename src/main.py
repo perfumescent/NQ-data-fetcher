@@ -7,7 +7,6 @@ import requests
 import json
 import sys
 import warnings
-from datetime import date
 
 # Suppress akshare's date format warnings
 warnings.filterwarnings('ignore', message='Could not infer format')
@@ -17,11 +16,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.jobs.schedulers import JobScheduler
 from src.providers.api_server_client import APIServerClient
+from src.core.cache import fund_cache, fund_history_cache
 
 # Configuration
 REMOTE_API_URL = os.getenv("REMOTE_API_URL", "http://localhost:8000/v1/internal/ingest")
 INTERVAL_SECONDS = 60 # 1 minute refresh
-RUN_ONCE = os.getenv("RUN_ONCE", "0") == "1"
 
 def main():
     print(f"Starting Data Pusher...")
@@ -35,6 +34,10 @@ def main():
     while True:
         try:
             start_time = time.time()
+
+            # 清空场外基金相关缓存，确保每轮都从源头重新拉取
+            fund_cache.clear()
+            fund_history_cache.clear()
 
             # 1. Fetch All Data
             print("\n[Job] Starting Validated Fetch Cycle...")
@@ -71,39 +74,30 @@ def main():
             import traceback
             traceback.print_exc()
 
-        if RUN_ONCE:
-            print("RUN_ONCE is set, exiting...")
-            break
-
         print(f"Sleeping for {INTERVAL_SECONDS}s...")
         time.sleep(INTERVAL_SECONDS)
 
 
 def _try_push_fund_list_data(data):
     """
-    检查今天是否已推送基金列表数据到 DB。
-    如果没有，从已组装好的 data 中提取列表字段并推送。
+    每个主循环周期都将基金列表数据 UPSERT 到 DB。
+    api_server 侧使用 ON DUPLICATE KEY UPDATE，多次推送幂等安全。
     失败不影响主循环。
     """
     try:
-        today = date.today().isoformat()  # "YYYY-MM-DD"
-        latest = APIServerClient.get_fund_data_latest_date()
+        from datetime import datetime, timezone, timedelta
+        today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
 
-        if latest == today:
-            print(f"[FundData] Today's data ({today}) already exists, skipping.")
-            return
-
-        print(f"[FundData] No data for {today} (latest: {latest}), pushing...")
         payload = JobScheduler.extract_fund_list_data(data, today)
 
         etf_count = len(payload.get("etf", []))
         fund_count = len(payload.get("fund", []))
-        print(f"[FundData] Extracted {etf_count} ETFs + {fund_count} Funds")
+        print(f"[FundData] Pushing {etf_count} ETFs + {fund_count} Funds for {today}")
+        for item in payload.get("fund", []):
+            print(f"[FundData]   {item['code']} {item.get('name', '')} quota={item.get('quota')!r}")
 
         ok = APIServerClient.push_fund_data(payload)
-        if ok:
-            print(f"[FundData] Successfully pushed fund list data for {today}")
-        else:
+        if not ok:
             print(f"[FundData] Push failed, will retry next cycle")
     except Exception as e:
         print(f"[FundData] Error in fund list push (non-fatal): {e}")

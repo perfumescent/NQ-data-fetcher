@@ -19,7 +19,6 @@ _remote = os.getenv("REMOTE_API_URL", "http://localhost:8000/v1/internal/ingest"
 _parsed = urlparse(_remote)
 _API_SERVER_BASE = f"{_parsed.scheme}://{_parsed.netloc}"
 _FUND_CONFIGS_URL = f"{_API_SERVER_BASE}/v1/internal/fund-configs"
-_FUND_DATA_STATUS_URL = f"{_API_SERVER_BASE}/v1/internal/fund-data/status"
 _FUND_DATA_INGEST_URL = f"{_API_SERVER_BASE}/v1/internal/fund-data"
 
 # 本地 fallback 路径
@@ -69,28 +68,6 @@ class APIServerClient:
         except Exception as e:
             print(f"[Config] Failed to load local funds.json: {e}")
             return {"etf": [], "fund": []}
-
-    # ---------------------------------------------------------------------------
-    # 列表数据状态检查
-    # ---------------------------------------------------------------------------
-
-    @staticmethod
-    def get_fund_data_latest_date() -> str | None:
-        """
-        查询 api_server 中基金列表数据的最新日期。
-        返回 "YYYY-MM-DD" 字符串，或 None（表示无数据 / 不可达）。
-        """
-        try:
-            resp = requests.get(_FUND_DATA_STATUS_URL, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                return data.get("latestDate")
-            else:
-                print(f"[FundData] Status check returned {resp.status_code}")
-                return None
-        except requests.exceptions.RequestException as e:
-            print(f"[FundData] Status check failed: {e}")
-            return None
 
     # ---------------------------------------------------------------------------
     # 推送列表数据

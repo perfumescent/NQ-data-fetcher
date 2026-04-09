@@ -300,15 +300,27 @@ class AkShareProvider:
             return date_str
 
     @staticmethod
-    def _parse_quota(sgzt: str, maxsg) -> str | None:
+    def _parse_quota(sgzt: str, maxsg, code: str = "") -> str | None:
         """
         将 FundMNBasicInformation 的 SGZT + MAXSG 转为可展示字符串。
         返回 None 表示无法解析，调用方应回退到静态配置。
+
+        Args:
+            sgzt: 申购状态字符串，如 "限大额" / "暂停申购" / "正常"
+            maxsg: 单日最大申购额（元），如 10000.0
+            code: 基金代码，仅用于日志
+
+        Returns:
+            格式化后的限购字符串（"1万" / "暂停" / "正常" 等），或 None（无法识别）
+
+        Created: 2025-11
+        易错点: MAXSG 单位是元，不是万元；场内 ETF 的 SGZT 通常为"场内交易"，此处返回 None 属正常。
         """
         sgzt_str = str(sgzt).strip() if sgzt and str(sgzt) != "--" else ""
 
         # 暂停申购：优先判断，忽略 MAXSG
         if "暂停" in sgzt_str:
+            print(f"[Quota] {code} SGZT={sgzt_str!r} MAXSG={maxsg!r} → 暂停")
             return "暂停"
 
         # 限大额：解析 MAXSG 数值
@@ -317,20 +329,23 @@ class AkShareProvider:
                 val = float(maxsg)
                 if val > 0:
                     if val >= 100_000_000:
-                        return f"{val / 100_000_000:.0f}亿"
+                        result = f"{val / 100_000_000:.0f}亿"
                     elif val >= 10_000:
-                        return f"{val / 10_000:.0f}万"
+                        result = f"{val / 10_000:.0f}万"
                     else:
-                        # 保留整数；小数部分通常无意义（如 10.0 → "10元"）
-                        return f"{int(val)}元"
+                        result = f"{int(val)}元"
+                    print(f"[Quota] {code} SGZT={sgzt_str!r} MAXSG={maxsg!r} → {result}")
+                    return result
             except (ValueError, TypeError):
                 pass
 
         # 正常申购
         if "正常" in sgzt_str:
+            print(f"[Quota] {code} SGZT={sgzt_str!r} MAXSG={maxsg!r} → 正常")
             return "正常"
 
         # 场内交易 / 其他无法识别的状态 → 返回 None
+        print(f"[Quota] {code} SGZT={sgzt_str!r} MAXSG={maxsg!r} → None (unrecognized)")
         return None
 
     @staticmethod
@@ -361,7 +376,7 @@ class AkShareProvider:
                      res["inceptionDate"] = str(estab_date).strip()
 
                  # Quota（仅场外基金有意义；场内 ETF 的 SGZT 为"场内交易"，_parse_quota 会返回 None）
-                 quota_str = AkShareProvider._parse_quota(info.get("SGZT"), info.get("MAXSG"))
+                 quota_str = AkShareProvider._parse_quota(info.get("SGZT"), info.get("MAXSG"), code)
                  if quota_str is not None:
                      res["quota"] = quota_str
 
@@ -458,6 +473,7 @@ class AkShareProvider:
         if fallback.get("quota"):
             res["quota"] = fallback["quota"]
 
+        print(f"[Metadata] {code} final quota={res.get('quota')!r}")
         return res
 
     @staticmethod
