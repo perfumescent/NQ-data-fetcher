@@ -19,8 +19,10 @@ _remote = os.getenv("REMOTE_API_URL", "http://localhost:8000/v1/internal/ingest"
 _parsed = urlparse(_remote)
 _API_SERVER_BASE = f"{_parsed.scheme}://{_parsed.netloc}"
 _FUND_CONFIGS_URL = f"{_API_SERVER_BASE}/v1/internal/fund-configs"
-_FUND_DATA_STATUS_URL = f"{_API_SERVER_BASE}/v1/internal/fund-data/status"
 _FUND_DATA_INGEST_URL = f"{_API_SERVER_BASE}/v1/internal/fund-data"
+_RAW_REALTIME_URL = f"{_API_SERVER_BASE}/v1/internal/raw/realtime"
+_RAW_META_URL = f"{_API_SERVER_BASE}/v1/internal/raw/meta"
+_RAW_HISTORY_URL = f"{_API_SERVER_BASE}/v1/internal/raw/history"
 
 # 本地 fallback 路径
 _LOCAL_FUNDS_JSON = os.path.abspath(
@@ -50,7 +52,7 @@ class APIServerClient:
                 data = resp.json()
                 if isinstance(data, dict) and ("etf" in data or "fund" in data):
                     print(f"[Config] Loaded fund configs from api_server ({_FUND_CONFIGS_URL})")
-                    return data
+                    return APIServerClient._merge_with_local_defaults(data)
                 print(f"[Config] api_server returned unexpected format, falling back to local JSON")
             else:
                 print(f"[Config] api_server returned {resp.status_code}, falling back to local JSON")
@@ -70,27 +72,44 @@ class APIServerClient:
             print(f"[Config] Failed to load local funds.json: {e}")
             return {"etf": [], "fund": []}
 
-    # ---------------------------------------------------------------------------
-    # 列表数据状态检查
-    # ---------------------------------------------------------------------------
-
     @staticmethod
-    def get_fund_data_latest_date() -> str | None:
+    def _merge_with_local_defaults(remote: dict) -> dict:
         """
-        查询 api_server 中基金列表数据的最新日期。
-        返回 "YYYY-MM-DD" 字符串，或 None（表示无数据 / 不可达）。
+        将 api_server 返回的基金配置与本地 funds.json 合并。
+
+        Args:
+            remote: api_server /internal/fund-configs 返回值，格式 {"etf": [...], "fund": [...]}。
+        Returns:
+            合并后的配置；本地 funds.json 提供 name、fee、quota 等静态兜底，remote 非空字段优先。
+
+        Created: 2026-05
+        易错点: 管理后台 DB 里可能只有 code/type/defaultFields 的极简配置，不能因此丢掉本地 funds.json 的 name/fee。
         """
-        try:
-            resp = requests.get(_FUND_DATA_STATUS_URL, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                return data.get("latestDate")
-            else:
-                print(f"[FundData] Status check returned {resp.status_code}")
-                return None
-        except requests.exceptions.RequestException as e:
-            print(f"[FundData] Status check failed: {e}")
-            return None
+        local = APIServerClient._load_local()
+        merged = {}
+        for segment in ("etf", "fund"):
+            local_items = local.get(segment, []) if isinstance(local, dict) else []
+            remote_items = remote.get(segment, []) if isinstance(remote, dict) else []
+            local_by_code = {
+                str(item.get("code")): item
+                for item in local_items
+                if isinstance(item, dict) and item.get("code")
+            }
+            segment_items = []
+            seen = set()
+            for item in remote_items:
+                if not isinstance(item, dict) or not item.get("code"):
+                    continue
+                code = str(item["code"])
+                base = dict(local_by_code.get(code, {}))
+                override = {k: v for k, v in item.items() if v is not None}
+                segment_items.append({**base, **override})
+                seen.add(code)
+            for code, item in local_by_code.items():
+                if code not in seen:
+                    segment_items.append(item)
+            merged[segment] = segment_items
+        return merged
 
     # ---------------------------------------------------------------------------
     # 推送列表数据
@@ -113,4 +132,79 @@ class APIServerClient:
                 return False
         except requests.exceptions.RequestException as e:
             print(f"[FundData] Push failed: {e}")
+            return False
+
+    # ---------------------------------------------------------------------------
+    # Raw ELT 推送
+    # ---------------------------------------------------------------------------
+
+    @staticmethod
+    def push_raw_realtime(payload: dict) -> bool:
+        """
+        推送实时 raw 数据。
+
+        Args:
+            payload: {"items": [...]}；每个 item 包含 symbol、assetType、rawPayload、updatedAt、dataDate；字段来源放在 rawPayload._sources。
+        Returns:
+            True 表示 api_server 返回 200；False 表示请求失败或服务端拒绝。
+
+        Created: 2026-05
+        易错点: raw 接口只在 api_server MySQL 模式可用，503 时应视为可重试失败。
+        """
+        return APIServerClient._post_raw(_RAW_REALTIME_URL, payload, "realtime")
+
+    @staticmethod
+    def push_raw_meta(payload: dict) -> bool:
+        """
+        推送元数据 raw 数据。
+
+        Args:
+            payload: {"items": [...]}；每个 item 包含 symbol、assetType、rawPayload、updatedAt、dataDate；字段来源放在 rawPayload._sources。
+        Returns:
+            True 表示 api_server 返回 200；False 表示请求失败或服务端拒绝。
+
+        Created: 2026-05
+        易错点: 同一 symbol+dataDate 会覆盖当天 meta_payload，是单表方案下的预期行为。
+        """
+        return APIServerClient._post_raw(_RAW_META_URL, payload, "meta")
+
+    @staticmethod
+    def push_raw_history(payload: dict) -> bool:
+        """
+        推送日级历史 raw 数据。
+
+        Args:
+            payload: {"items": [...]}；每个 item 包含 symbol、date、assetType、rawPayload；字段来源放在 rawPayload._sources。
+        Returns:
+            True 表示 api_server 返回 200；False 表示请求失败或服务端拒绝。
+
+        Created: 2026-05
+        易错点: 只有 backfill 主动入口会调用本方法；main.py 增量循环不应推送 history。
+        """
+        return APIServerClient._post_raw(_RAW_HISTORY_URL, payload, "history")
+
+    @staticmethod
+    def _post_raw(url: str, payload: dict, label: str) -> bool:
+        """
+        执行 raw POST 请求。
+
+        Args:
+            url: internal raw ingest URL。
+            payload: JSON payload。
+            label: 日志标签。
+        Returns:
+            True 表示成功；False 表示失败。
+
+        Created: 2026-05
+        易错点: 这里不 raise，避免 raw 单路失败导致 data_fetcher 整个循环退出。
+        """
+        try:
+            resp = requests.post(url, json=payload, timeout=20)
+            if resp.status_code == 200:
+                print(f"[RawData] {label} push succeeded: {resp.json()}")
+                return True
+            print(f"[RawData] {label} push failed with {resp.status_code}: {resp.text}")
+            return False
+        except requests.exceptions.RequestException as e:
+            print(f"[RawData] {label} push failed: {e}")
             return False
