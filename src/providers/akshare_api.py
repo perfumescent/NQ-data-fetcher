@@ -6,6 +6,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import re
 import json
+import threading
 
 # Setup a robust session with Retries
 session = requests.Session()
@@ -53,6 +54,24 @@ def _safe_float(val, default: float | None = None) -> float | None:
 
 
 class AkShareProvider:
+    _etf_spot_batch_cache: pd.DataFrame | None = None
+    _etf_spot_batch_lock = threading.Lock()
+
+    @staticmethod
+    def reset_cycle_cache() -> None:
+        """
+        清空单轮采集缓存。
+
+        Args:
+            无。
+        Returns:
+            None。
+
+        Created: 2026-05
+        易错点: data_fetcher 是常驻进程；不在每轮开始清空会导致 ETF 实时行情跨轮复用旧数据。
+        """
+        with AkShareProvider._etf_spot_batch_lock:
+            AkShareProvider._etf_spot_batch_cache = None
 
     # ──────────────────────────────────────────────────────────────
     # ETF 实时行情（批量 + 按 code 查询）
@@ -63,6 +82,8 @@ class AkShareProvider:
         """
         批量拉取全市场 ETF 实时行情快照（东方财富，经 AkShare 封装）。
 
+        Args:
+            无。
         Returns:
             包含所有 ETF 当日行情的 DataFrame，列名为中文（东方财富原始命名）。
             核心列：代码、最新价、IOPV实时估值、基金折价率、涨跌幅、换手率、成交量、成交额。
@@ -75,14 +96,19 @@ class AkShareProvider:
               此时调用方应降级到 _fetch_etf_realtime_sina()。
             - 非交易时段（盘前/盘后/节假日）返回的是上一交易日收盘数据，
               此时"基金折价率"可能为 0，调用方需兜底。
+            - 同一采集轮会并发拉多只 ETF，必须用锁保护进程内缓存，否则批量接口会被重复请求。
         """
-        try:
-            df = ak.fund_etf_spot_em()
-            print(f"[ETF Batch] ✓ 东方财富批量接口成功，共 {len(df)} 只 ETF")
+        with AkShareProvider._etf_spot_batch_lock:
+            if AkShareProvider._etf_spot_batch_cache is not None:
+                return AkShareProvider._etf_spot_batch_cache
+            df = pd.DataFrame()
+            try:
+                df = ak.fund_etf_spot_em()
+                print(f"[ETF Batch] ✓ 东方财富批量接口成功，共 {len(df)} 只 ETF")
+            except Exception as e:
+                print(f"[ETF Batch] ✗ 东方财富批量接口失败，将对每只 ETF 降级至新浪单次请求。原因: {e}")
+            AkShareProvider._etf_spot_batch_cache = df
             return df
-        except Exception as e:
-            print(f"[ETF Batch] ✗ 东方财富批量接口失败，将对每只 ETF 降级至新浪单次请求。原因: {e}")
-            return pd.DataFrame()
 
     @staticmethod
     def get_etf_realtime(code: str) -> dict | None:
@@ -185,6 +211,7 @@ class AkShareProvider:
             "volume": volume,
             "turnoverAmount": amount,
             "timestamp": datetime.utcnow(),
+            "_dataSource": "eastmoney",
         }
 
     @staticmethod
@@ -282,6 +309,7 @@ class AkShareProvider:
             "volume": volume,
             "turnoverAmount": amount,
             "timestamp": datetime.utcnow(),
+            "_dataSource": "sina",
         }
 
     @staticmethod
@@ -393,7 +421,8 @@ class AkShareProvider:
                         "nav": nav,
                         "name": name,
                         "updatedAt": AkShareProvider._parse_iso(data.get("gztime")),
-                        "navDate": data.get("jzrq")
+                        "navDate": data.get("jzrq"),
+                        "_dataSource": "eastmoney",
                     }
         except Exception as e:
             print(f"[WARN] EastMoney Fund Estimate fetch failed for {code}: {e}")
