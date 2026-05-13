@@ -4,11 +4,77 @@ from datetime import datetime
 from ..core.cache import price_cache, chart_cache, indicator_cache, high52w_cache
 from cachetools import cached
 
+
+def _fast_info_value(fast, *names):
+    """
+    Read a yfinance fast_info value without assuming attribute access is safe.
+
+    Args:
+        fast: yfinance FastInfo-like object.
+        *names: Candidate snake_case/camelCase keys or attributes.
+    Returns:
+        First non-empty value; None means the value is unavailable.
+
+    Created: 2026-05
+    易错点: Some yfinance properties lazily call quote metadata and can raise
+    currentTradingPeriod KeyError; callers must be able to continue fallback.
+    """
+    for name in names:
+        try:
+            if hasattr(fast, "get"):
+                value = fast.get(name)
+                if not _is_missing(value):
+                    return value
+        except Exception:
+            pass
+        try:
+            value = getattr(fast, name)
+            if not _is_missing(value):
+                return value
+        except Exception:
+            pass
+    return None
+
+
+def _is_missing(value) -> bool:
+    """
+    Decide whether a Yahoo numeric field is absent or unusable.
+
+    Args:
+        value: Any provider value, commonly None, NaN, or a numeric scalar.
+    Returns:
+        True when the value should be treated as missing.
+
+    Created: 2026-05
+    易错点: pandas.isna raises for some container-like objects, so keep it behind
+    a broad guard and only use this helper for scalar quote fields.
+    """
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except Exception:
+        return False
+
+
 class YahooProvider:
 
     @staticmethod
     @cached(price_cache)
     def get_price(symbol: str) -> dict | None:
+        """
+        Fetch the latest Yahoo quote with layered fallbacks.
+
+        Args:
+            symbol: Yahoo Finance symbol such as ^NDX, ^TNX, NQ=F, or CNY=X.
+        Returns:
+            {"price": float, "changePct": float, "timestamp": datetime} when a valid
+            price can be found; None means every quote/history source failed.
+
+        Created: 2026-05
+        易错点: yfinance fast_info may raise KeyError("currentTradingPeriod") for
+        indices/volatility symbols; that must not prevent the history fallback.
+        """
         try:
             ticker = yf.Ticker(symbol)
             
@@ -25,21 +91,31 @@ class YahooProvider:
 
             # 2. Fallback to fast_info if info failed or keys missing
             if price is None or prev_close is None:
-                fast = ticker.fast_info
-                price = fast.last_price
-                prev_close = fast.previous_close
+                try:
+                    fast = ticker.fast_info
+                    if price is None:
+                        price = _fast_info_value(fast, "last_price", "lastPrice")
+                    if prev_close is None:
+                        prev_close = _fast_info_value(fast, "previous_close", "previousClose")
+                except Exception as e:
+                    print(f"[Warn] Yahoo fast_info failed for {symbol}: {e}")
 
             # 3. Fallback to History
-            if price is None or pd.isna(price):
-                hist = ticker.history(period="2d")
+            if _is_missing(price) or _is_missing(prev_close):
+                hist = ticker.history(period="5d")
                 if not hist.empty:
-                     price = float(hist.iloc[-1]["Close"])
-                     if prev_close is None or pd.isna(prev_close):
-                         prev_close = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else price
+                    if _is_missing(price):
+                        price = float(hist.iloc[-1]["Close"])
+                    if _is_missing(prev_close):
+                        prev_close = float(hist.iloc[-2]["Close"]) if len(hist) > 1 else price
+            
+            if _is_missing(price):
+                print(f"[Warn] Yahoo get_price {symbol}: no valid price")
+                return None
             
             # Ensure floats
-            price = float(price) if price else 0.0
-            prev_close = float(prev_close) if prev_close else 0.0
+            price = float(price)
+            prev_close = float(prev_close) if not _is_missing(prev_close) else price
             
             change_pct = (price - prev_close) / prev_close if prev_close else 0.0
             

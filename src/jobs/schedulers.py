@@ -209,19 +209,23 @@ class RawJobScheduler:
         }
 
     @staticmethod
-    def _fetch_index_raw(symbol: str) -> dict:
+    def _fetch_index_raw(symbol: str) -> dict | None:
         """
         拉取指数相关 raw 数据。
 
         Args:
             symbol: 指数代码，当前为 ^NDX。
         Returns:
-            单表快照中的 quote 槽位 item。
+            单表快照中的 quote 槽位 item；核心 priceData 缺失时返回 None。
 
         Created: 2026-05
-        易错点: dailyHistory 用于 api_server 计算 RSI/MA，valuation 只是 QQQ 可得估值快照，不是 NDX 官方估值。
+        易错点: dailyHistory 用于 api_server 计算 RSI/MA；priceData 缺失时不能推送，否则会覆盖 DB 中当天有效 quote。
         """
         print(f"[RawJob] Fetching Index {symbol}...")
+        price_data = YahooProvider.get_price(symbol)
+        if not _has_price_data(price_data):
+            print(f"[RawJob] Index {symbol} skipped: missing core priceData")
+            return None
         related = {
             "tnx": YahooProvider.get_price("^TNX"),
             "vxn": YahooProvider.get_price("^VXN"),
@@ -231,7 +235,7 @@ class RawJobScheduler:
         }
         valuation = ValuationProvider.get_qqq_available_valuation_yahoo() if symbol == "^NDX" else None
         payload = {
-            "priceData": YahooProvider.get_price(symbol),
+            "priceData": price_data,
             "dailyHistory": YahooProvider.get_history(symbol, period="1y", interval="1d"),
             "chartHistory": YahooProvider.get_history("NQ=F", period="2mo", interval="1d")[-30:],
             "relatedPrices": related,
@@ -255,21 +259,25 @@ class RawJobScheduler:
         return _raw_item(symbol, "index", payload, _updated_at(payload.get("priceData")))
 
     @staticmethod
-    def _fetch_fx_raw(symbol: str) -> dict:
+    def _fetch_fx_raw(symbol: str) -> dict | None:
         """
         拉取汇率 raw 数据。
 
         Args:
             symbol: Yahoo Finance 汇率代码，如 CNY=X。
         Returns:
-            单表快照中的 quote 槽位 item。
+            单表快照中的 quote 槽位 item；核心 priceData 缺失时返回 None。
 
         Created: 2026-05
-        易错点: 场外基金指标只需要 price，缺失时 api_server 会用 7.25 兜底；字段来源写入 payload._sources。
+        易错点: 场外基金指标只需要 price，但空 quote 不能覆盖当天已有汇率快照。
         """
         print(f"[RawJob] Fetching FX {symbol}...")
+        price_data = YahooProvider.get_price(symbol)
+        if not _has_price_data(price_data):
+            print(f"[RawJob] FX {symbol} skipped: missing core priceData")
+            return None
         payload = {
-            "priceData": YahooProvider.get_price(symbol),
+            "priceData": price_data,
             "_sources": {"priceData": "yahoo"},
         }
         return _raw_item(symbol, "fx", payload, _updated_at(payload.get("priceData")))
@@ -415,6 +423,26 @@ def _raw_item(symbol: str, asset_type: str, payload: dict, updated_at: str | Non
         "updatedAt": updated_at,
         "dataDate": _today_utc_date(),
     }
+
+
+def _has_price_data(payload: dict | None) -> bool:
+    """
+    判断 quote payload 是否包含可写入的核心价格。
+
+    Args:
+        payload: YahooProvider.get_price 返回值，None 表示上游彻底失败。
+    Returns:
+        True 表示 price 字段存在且可转为 float；False 表示应跳过本次 realtime upsert。
+
+    Created: 2026-05
+    易错点: raw_daily_snapshots 当天 quote 会被覆盖，不能让空 priceData 污染本地首页数据。
+    """
+    if not isinstance(payload, dict):
+        return False
+    try:
+        return float(payload.get("price")) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _history_items(symbol: str, asset_type: str, source: str, points: list[dict], limit: int | None) -> list[dict]:
