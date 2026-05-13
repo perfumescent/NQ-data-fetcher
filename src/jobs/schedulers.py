@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from src.providers.api_server_client import APIServerClient
 from src.providers.yahoo import YahooProvider
 from src.providers.akshare_api import AkShareProvider
+from src.providers.valuation import ValuationProvider
 
 
 @dataclass(frozen=True)
@@ -105,7 +106,7 @@ class RawJobScheduler:
             {"realtime": [...], "meta": [...], "history": [...]}，history 为全量 provider 历史点。
 
         Created: 2026-05
-        易错点: 本方法可能产生大量 history item，只能由主动回填入口调用。
+        易错点: 本方法可能产生大量 history item，只能由主动回填入口调用；指数历史必须用 Yahoo max，不要写死 10y。
         """
         return RawJobScheduler.fetch_raw(RawJobScheduler.backfill_plan())
 
@@ -130,6 +131,26 @@ class RawJobScheduler:
 
         if plan.include_realtime:
             realtime_items.extend([RawJobScheduler._fetch_index_raw("^NDX"), RawJobScheduler._fetch_fx_raw("CNY=X")])
+        if plan.include_history:
+            history_items.extend(
+                _history_items(
+                    "^NDX",
+                    "index",
+                    "yahoo",
+                    YahooProvider.get_history("^NDX", period="max", interval="1d"),
+                    plan.history_limit,
+                )
+            )
+            for related_symbol in ["^VXN", "^VIX", "^MOVE", "^TNX"]:
+                history_items.extend(
+                    _history_items(
+                        related_symbol,
+                        "index",
+                        "yahoo",
+                        YahooProvider.get_history(related_symbol, period="max", interval="1d"),
+                        plan.history_limit,
+                    )
+                )
 
         etf_items = conf.get("etf", [])
         fund_items = conf.get("fund", [])
@@ -198,20 +219,23 @@ class RawJobScheduler:
             单表快照中的 quote 槽位 item。
 
         Created: 2026-05
-        易错点: dailyHistory 用于 api_server 计算 RSI/MA，chartHistory 沿用旧版近 30 日展示；字段来源写入 payload._sources。
+        易错点: dailyHistory 用于 api_server 计算 RSI/MA，valuation 只是 QQQ 可得估值快照，不是 NDX 官方估值。
         """
         print(f"[RawJob] Fetching Index {symbol}...")
         related = {
             "tnx": YahooProvider.get_price("^TNX"),
             "vxn": YahooProvider.get_price("^VXN"),
             "vix": YahooProvider.get_price("^VIX"),
+            "move": YahooProvider.get_price("^MOVE"),
             "fut": YahooProvider.get_price("NQ=F"),
         }
+        valuation = ValuationProvider.get_qqq_available_valuation_yahoo() if symbol == "^NDX" else None
         payload = {
             "priceData": YahooProvider.get_price(symbol),
             "dailyHistory": YahooProvider.get_history(symbol, period="1y", interval="1d"),
             "chartHistory": YahooProvider.get_history("NQ=F", period="2mo", interval="1d")[-30:],
             "relatedPrices": related,
+            "valuation": {"qqq": valuation} if valuation else {},
             "high52w": YahooProvider.get_52w_high(symbol),
             "_sources": {
                 "priceData": "yahoo",
@@ -221,8 +245,10 @@ class RawJobScheduler:
                     "tnx": "yahoo:^TNX",
                     "vxn": "yahoo:^VXN",
                     "vix": "yahoo:^VIX",
+                    "move": "yahoo:^MOVE",
                     "fut": "yahoo:NQ=F",
                 },
+                "valuation": "yahoo:QQQ",
                 "high52w": "yahoo",
             },
         }
@@ -397,7 +423,7 @@ def _history_items(symbol: str, asset_type: str, source: str, points: list[dict]
 
     Args:
         symbol: 产品代码。
-        asset_type: etf/fund。
+        asset_type: index/etf/fund。
         source: 数据来源标签，会被同时写入 rawPayload._sources 供字段级追踪。
         points: [{"t": YYYY-MM-DD, "p": float}, ...]。
         limit: 最近 N 条；None 表示全量。

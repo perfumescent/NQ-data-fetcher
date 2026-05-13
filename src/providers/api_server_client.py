@@ -23,6 +23,7 @@ _FUND_DATA_INGEST_URL = f"{_API_SERVER_BASE}/v1/internal/fund-data"
 _RAW_REALTIME_URL = f"{_API_SERVER_BASE}/v1/internal/raw/realtime"
 _RAW_META_URL = f"{_API_SERVER_BASE}/v1/internal/raw/meta"
 _RAW_HISTORY_URL = f"{_API_SERVER_BASE}/v1/internal/raw/history"
+_RAW_HISTORY_CHUNK_SIZE = 500
 
 # 本地 fallback 路径
 _LOCAL_FUNDS_JSON = os.path.abspath(
@@ -179,9 +180,25 @@ class APIServerClient:
             True 表示 api_server 返回 200；False 表示请求失败或服务端拒绝。
 
         Created: 2026-05
-        易错点: 只有 backfill 主动入口会调用本方法；main.py 增量循环不应推送 history。
+        易错点: 全量 backfill 的 history payload 会很大，必须分片 POST，避免 nginx 413 Request Entity Too Large。
         """
-        return APIServerClient._post_raw(_RAW_HISTORY_URL, payload, "history")
+        items = payload.get("items", [])
+        if not isinstance(items, list):
+            return APIServerClient._post_raw(_RAW_HISTORY_URL, payload, "history")
+        if not items:
+            print("[RawData] history skipped: no items")
+            return True
+
+        ok = True
+        total = len(items)
+        for start in range(0, total, _RAW_HISTORY_CHUNK_SIZE):
+            chunk = items[start:start + _RAW_HISTORY_CHUNK_SIZE]
+            chunk_no = start // _RAW_HISTORY_CHUNK_SIZE + 1
+            chunk_total = (total + _RAW_HISTORY_CHUNK_SIZE - 1) // _RAW_HISTORY_CHUNK_SIZE
+            label = f"history chunk {chunk_no}/{chunk_total}"
+            if not APIServerClient._post_raw(_RAW_HISTORY_URL, {"items": chunk}, label):
+                ok = False
+        return ok
 
     @staticmethod
     def _post_raw(url: str, payload: dict, label: str) -> bool:
