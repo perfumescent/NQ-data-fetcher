@@ -457,28 +457,33 @@ class AkShareProvider:
             格式化后的限购字符串（"1万" / "暂停" / "正常" 等），或 None（无法识别）
 
         Created: 2025-11
-        易错点: MAXSG 单位是元，不是万元；场内 ETF 的 SGZT 通常为"场内交易"，此处返回 None 属正常。
+        易错点: 东财可能同时返回 "暂停申购" 和正数 MAXSG；这种 QDII 场景不能直接覆盖静态限额为暂停。
         """
         sgzt_str = str(sgzt).strip() if sgzt and str(sgzt) != "--" else ""
+        parsed_maxsg = None
+        if maxsg is not None and str(maxsg).strip() not in ("--", "", "None"):
+            try:
+                parsed_maxsg = float(maxsg)
+            except (ValueError, TypeError):
+                parsed_maxsg = None
 
         if "暂停" in sgzt_str:
+            if parsed_maxsg is not None and parsed_maxsg > 0:
+                print(f"[Quota] {code} SGZT={sgzt_str!r} MAXSG={maxsg!r} → None (use configured quota)")
+                return None
             print(f"[Quota] {code} SGZT={sgzt_str!r} MAXSG={maxsg!r} → 暂停")
             return "暂停"
 
-        if maxsg is not None and str(maxsg).strip() not in ("--", "", "None"):
-            try:
-                val = float(maxsg)
-                if val > 0:
-                    if val >= 100_000_000:
-                        result = f"{val / 100_000_000:.0f}亿"
-                    elif val >= 10_000:
-                        result = f"{val / 10_000:.0f}万"
-                    else:
-                        result = f"{int(val)}元"
-                    print(f"[Quota] {code} SGZT={sgzt_str!r} MAXSG={maxsg!r} → {result}")
-                    return result
-            except (ValueError, TypeError):
-                pass
+        if parsed_maxsg is not None and parsed_maxsg > 0:
+            val = parsed_maxsg
+            if val >= 100_000_000:
+                result = f"{val / 100_000_000:.0f}亿"
+            elif val >= 10_000:
+                result = f"{val / 10_000:.0f}万"
+            else:
+                result = f"{int(val)}元"
+            print(f"[Quota] {code} SGZT={sgzt_str!r} MAXSG={maxsg!r} → {result}")
+            return result
 
         if "正常" in sgzt_str:
             print(f"[Quota] {code} SGZT={sgzt_str!r} MAXSG={maxsg!r} → 正常")

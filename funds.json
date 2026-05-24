@@ -1,6 +1,13 @@
 {
     "etf": [
         {
+            "code": "161128",
+            "name": "标普科技LOF",
+            "fee": 0.012,
+            "trackingError": null,
+            "inceptionDate": null
+        },
+        {
             "code": "159660",
             "name": "汇添富",
             "fee": 0.0065,
