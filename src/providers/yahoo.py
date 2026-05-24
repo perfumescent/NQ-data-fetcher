@@ -1,6 +1,6 @@
 import yfinance as yf
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from ..core.cache import price_cache, chart_cache, indicator_cache, high52w_cache
 from cachetools import cached
 
@@ -57,6 +57,40 @@ def _is_missing(value) -> bool:
         return False
 
 
+def _market_timestamp(info: dict | None, history_timestamp) -> datetime:
+    """
+    返回 Yahoo quote 对应的市场时间。
+
+    Args:
+        info: yfinance Ticker.info 字典；缺失 regularMarketTime 时允许为 None。
+        history_timestamp: yfinance history 最后一根 K 线索引；未使用 history fallback 时为 None。
+    Returns:
+        timezone-naive UTC datetime；无法确认市场时间时返回当前 UTC。
+
+    Created: 2026-05
+    易错点: 不能直接用抓取时间作为行情时间；周末抓取会把周五收盘价伪造成周末 K 线，导致 RSI/MA 偏高。
+    """
+    if isinstance(info, dict):
+        raw = info.get("regularMarketTime") or info.get("postMarketTime") or info.get("preMarketTime")
+        if raw:
+            try:
+                return datetime.fromtimestamp(float(raw), tz=timezone.utc).replace(tzinfo=None)
+            except Exception:
+                pass
+    if history_timestamp is not None:
+        try:
+            if hasattr(history_timestamp, "to_pydatetime"):
+                value = history_timestamp.to_pydatetime()
+            else:
+                value = history_timestamp
+            if getattr(value, "tzinfo", None) is not None:
+                value = value.astimezone(timezone.utc).replace(tzinfo=None)
+            return value
+        except Exception:
+            pass
+    return datetime.utcnow()
+
+
 class YahooProvider:
 
     @staticmethod
@@ -101,9 +135,11 @@ class YahooProvider:
                     print(f"[Warn] Yahoo fast_info failed for {symbol}: {e}")
 
             # 3. Fallback to History
+            history_timestamp = None
             if _is_missing(price) or _is_missing(prev_close):
                 hist = ticker.history(period="5d")
                 if not hist.empty:
+                    history_timestamp = hist.index[-1]
                     if _is_missing(price):
                         price = float(hist.iloc[-1]["Close"])
                     if _is_missing(prev_close):
@@ -122,7 +158,7 @@ class YahooProvider:
             return {
                 "price": price,
                 "changePct": change_pct,
-                "timestamp": datetime.utcnow()
+                "timestamp": _market_timestamp(info, history_timestamp)
             }
         except Exception as e:
             print(f"[Error] Yahoo get_price {symbol}: {e}")

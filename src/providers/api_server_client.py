@@ -3,13 +3,13 @@ api_server_client.py
 data_fetcher 与 api_server 通信的 HTTP 客户端。
 
 职责：
-1. 拉取基金配置（GET /internal/fund-configs），失败时 fallback 到本地 funds.json
+1. 拉取基金配置（GET /internal/fund-configs），以 api_server / DB 为唯一配置来源
 2. 查询列表数据状态（GET /internal/fund-data/status）
 3. 推送列表数据（POST /internal/fund-data）
 """
 
-import json
 import os
+from time import perf_counter
 from urllib.parse import urlparse
 
 import requests
@@ -25,12 +25,6 @@ _RAW_META_URL = f"{_API_SERVER_BASE}/v1/internal/raw/meta"
 _RAW_HISTORY_URL = f"{_API_SERVER_BASE}/v1/internal/raw/history"
 _RAW_HISTORY_CHUNK_SIZE = 500
 
-# 本地 fallback 路径
-_LOCAL_FUNDS_JSON = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../funds.json")
-)
-
-
 class APIServerClient:
 
     # ---------------------------------------------------------------------------
@@ -40,77 +34,56 @@ class APIServerClient:
     @staticmethod
     def get_fund_configs() -> dict:
         """
-        返回基金配置字典，格式：{"etf": [...], "fund": [...]}
+        从 api_server 返回基金配置字典。
 
-        优先从 api_server 拉取；以下情况自动 fallback 到本地 funds.json：
-        - api_server 不可达
-        - 返回非 2xx（含 503，表示 DB 未配置）
-        - 返回数据格式不符合预期
+        Args:
+            无。
+        Returns:
+            {"etf": [...], "fund": [...]}；api_server 不可达、DB 未配置或响应格式异常时返回空列表结构。
+
+        Created: 2026-05
+        易错点: 基金配置只能来自 api_server/DB；不要再读取或合并本地静态 JSON，否则会掩盖 DB 配置缺失。
         """
+        started_at = perf_counter()
         try:
             resp = requests.get(_FUND_CONFIGS_URL, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, dict) and ("etf" in data or "fund" in data):
                     print(f"[Config] Loaded fund configs from api_server ({_FUND_CONFIGS_URL})")
-                    return APIServerClient._merge_with_local_defaults(data)
-                print(f"[Config] api_server returned unexpected format, falling back to local JSON")
+                    return APIServerClient._normalize_fund_configs(data)
+                print("[Config] api_server returned unexpected format; no fund configs loaded")
             else:
-                print(f"[Config] api_server returned {resp.status_code}, falling back to local JSON")
+                print(f"[Config] api_server returned {resp.status_code}; no fund configs loaded")
         except requests.exceptions.RequestException as e:
-            print(f"[Config] Could not reach api_server ({e}), falling back to local JSON")
+            print(f"[Config] Could not reach api_server ({e}); no fund configs loaded")
+        finally:
+            print(f"[Timing] config GET /internal/fund-configs took {perf_counter() - started_at:.2f}s")
 
-        return APIServerClient._load_local()
-
-    @staticmethod
-    def _load_local() -> dict:
-        try:
-            with open(_LOCAL_FUNDS_JSON, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            print(f"[Config] Loaded fund configs from local {_LOCAL_FUNDS_JSON}")
-            return data
-        except Exception as e:
-            print(f"[Config] Failed to load local funds.json: {e}")
-            return {"etf": [], "fund": []}
+        return {"etf": [], "fund": []}
 
     @staticmethod
-    def _merge_with_local_defaults(remote: dict) -> dict:
+    def _normalize_fund_configs(data: dict) -> dict:
         """
-        将 api_server 返回的基金配置与本地 funds.json 合并。
+        规范化 api_server 返回的基金配置。
 
         Args:
-            remote: api_server /internal/fund-configs 返回值，格式 {"etf": [...], "fund": [...]}。
+            data: api_server /internal/fund-configs 返回值，格式 {"etf": [...], "fund": [...]}。
         Returns:
-            合并后的配置；本地 funds.json 提供 name、fee、quota 等静态兜底，remote 非空字段优先。
+            只包含有效 dict item 的 {"etf": [...], "fund": [...]}。
 
         Created: 2026-05
-        易错点: 管理后台 DB 里可能只有 code/type/defaultFields 的极简配置，不能因此丢掉本地 funds.json 的 name/fee。
+        易错点: 不补本地默认值；DB 里的 default_fields 必须完整维护 data_fetcher 需要的静态字段。
         """
-        local = APIServerClient._load_local()
-        merged = {}
+        normalized = {}
         for segment in ("etf", "fund"):
-            local_items = local.get(segment, []) if isinstance(local, dict) else []
-            remote_items = remote.get(segment, []) if isinstance(remote, dict) else []
-            local_by_code = {
-                str(item.get("code")): item
-                for item in local_items
+            items = data.get(segment, []) if isinstance(data, dict) else []
+            normalized[segment] = [
+                item
+                for item in items
                 if isinstance(item, dict) and item.get("code")
-            }
-            segment_items = []
-            seen = set()
-            for item in remote_items:
-                if not isinstance(item, dict) or not item.get("code"):
-                    continue
-                code = str(item["code"])
-                base = dict(local_by_code.get(code, {}))
-                override = {k: v for k, v in item.items() if v is not None}
-                segment_items.append({**base, **override})
-                seen.add(code)
-            for code, item in local_by_code.items():
-                if code not in seen:
-                    segment_items.append(item)
-            merged[segment] = segment_items
-        return merged
+            ]
+        return normalized
 
     # ---------------------------------------------------------------------------
     # 推送列表数据
@@ -215,6 +188,7 @@ class APIServerClient:
         Created: 2026-05
         易错点: 这里不 raise，避免 raw 单路失败导致 data_fetcher 整个循环退出。
         """
+        started_at = perf_counter()
         try:
             resp = requests.post(url, json=payload, timeout=20)
             if resp.status_code == 200:
@@ -225,3 +199,5 @@ class APIServerClient:
         except requests.exceptions.RequestException as e:
             print(f"[RawData] {label} push failed: {e}")
             return False
+        finally:
+            print(f"[Timing] raw POST {label} took {perf_counter() - started_at:.2f}s")

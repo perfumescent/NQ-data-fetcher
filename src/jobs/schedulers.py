@@ -1,6 +1,7 @@
 import concurrent.futures
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from time import perf_counter
 from src.providers.api_server_client import APIServerClient
 from src.providers.yahoo import YahooProvider
 from src.providers.akshare_api import AkShareProvider
@@ -64,7 +65,7 @@ class RawJobScheduler:
     @staticmethod
     def _load_config():
         """
-        从 api_server 或本地 funds.json 读取基金清单。
+        从 api_server 读取基金清单。
 
         Args:
             无。
@@ -72,7 +73,7 @@ class RawJobScheduler:
             {"etf": [...], "fund": [...]}，缺失时返回空列表结构。
 
         Created: 2026-05
-        易错点: 该方法复用 APIServerClient.get_fund_configs；api_server 无 DB 时会自动 fallback 到本地 JSON。
+        易错点: 基金配置只来自 api_server/DB；api_server 无 DB 时返回空列表，避免旧静态配置继续生效。
         """
         conf = APIServerClient.get_fund_configs()
         return {
@@ -123,14 +124,18 @@ class RawJobScheduler:
         Created: 2026-05
         易错点: provider 层已经做了最小标准化；调度层只决定拉哪些槽位，不拼 subtitle、不算 RSI/MA。
         """
-        conf = RawJobScheduler._load_config()
+        fetch_started_at = perf_counter()
+        conf = _timed_call("fetch config", RawJobScheduler._load_config)
         AkShareProvider.reset_cycle_cache()
         realtime_items = []
         meta_items = []
         history_items = []
 
         if plan.include_realtime:
-            realtime_items.extend([RawJobScheduler._fetch_index_raw("^NDX"), RawJobScheduler._fetch_fx_raw("CNY=X")])
+            realtime_items.extend([
+                RawJobScheduler._fetch_index_raw("^NDX"),
+                RawJobScheduler._fetch_fx_raw("CNY=X"),
+            ])
         if plan.include_history:
             history_items.extend(
                 _history_items(
@@ -160,7 +165,7 @@ class RawJobScheduler:
             拉取单只 ETF raw 数据。
 
             Args:
-                item: funds.json/API 配置项，必须包含 code。
+                item: api_server/DB 配置项，必须包含 code。
             Returns:
                 (realtime_item, meta_item, history_items)。
 
@@ -178,7 +183,7 @@ class RawJobScheduler:
             拉取单只场外基金 raw 数据。
 
             Args:
-                item: funds.json/API 配置项，必须包含 code。
+                item: api_server/DB 配置项，必须包含 code。
             Returns:
                 (realtime_item, meta_item, history_items)。
 
@@ -191,6 +196,7 @@ class RawJobScheduler:
                 print(f"[RawJob] Fund {item.get('code')} failed: {e}")
                 return None, None, []
 
+        products_started_at = perf_counter()
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(fetch_etf, item) for item in etf_items]
             futures.extend(executor.submit(fetch_fund, item) for item in fund_items)
@@ -201,12 +207,20 @@ class RawJobScheduler:
                 if meta:
                     meta_items.append(meta)
                 history_items.extend(history)
+        print(
+            f"[Timing] products fetch total took {perf_counter() - products_started_at:.2f}s "
+            f"(etf={len(etf_items)}, fund={len(fund_items)}, workers=5)"
+        )
 
-        return {
+        json_started_at = perf_counter()
+        result = {
             "realtime": [_json_ready(item) for item in realtime_items if item],
             "meta": [_json_ready(item) for item in meta_items if item],
             "history": [_json_ready(item) for item in history_items if item],
         }
+        print(f"[Timing] json ready took {perf_counter() - json_started_at:.2f}s")
+        print(f"[Timing] fetch_raw {plan.name} total took {perf_counter() - fetch_started_at:.2f}s")
+        return result
 
     @staticmethod
     def _fetch_index_raw(symbol: str) -> dict | None:
@@ -221,42 +235,68 @@ class RawJobScheduler:
         Created: 2026-05
         易错点: dailyHistory 用于 api_server 计算 RSI/MA；priceData 缺失时不能推送，否则会覆盖 DB 中当天有效 quote。
         """
+        started_at = perf_counter()
         print(f"[RawJob] Fetching Index {symbol}...")
-        price_data = YahooProvider.get_price(symbol)
-        if not _has_price_data(price_data):
-            print(f"[RawJob] Index {symbol} skipped: missing core priceData")
-            return None
-        related = {
-            "tnx": YahooProvider.get_price("^TNX"),
-            "vxn": YahooProvider.get_price("^VXN"),
-            "vix": YahooProvider.get_price("^VIX"),
-            "move": YahooProvider.get_price("^MOVE"),
-            "fut": YahooProvider.get_price("NQ=F"),
-        }
-        valuation = ValuationProvider.get_qqq_available_valuation_yahoo() if symbol == "^NDX" else None
-        payload = {
-            "priceData": price_data,
-            "dailyHistory": YahooProvider.get_history(symbol, period="1y", interval="1d"),
-            "chartHistory": YahooProvider.get_history("NQ=F", period="2mo", interval="1d")[-30:],
-            "relatedPrices": related,
-            "valuation": {"qqq": valuation} if valuation else {},
-            "high52w": YahooProvider.get_52w_high(symbol),
-            "_sources": {
-                "priceData": "yahoo",
-                "dailyHistory": "yahoo",
-                "chartHistory": "yahoo:NQ=F",
-                "relatedPrices": {
-                    "tnx": "yahoo:^TNX",
-                    "vxn": "yahoo:^VXN",
-                    "vix": "yahoo:^VIX",
-                    "move": "yahoo:^MOVE",
-                    "fut": "yahoo:NQ=F",
+        try:
+            price_data = _timed_call(f"index {symbol} price", YahooProvider.get_price, symbol)
+            if not _has_price_data(price_data):
+                print(f"[RawJob] Index {symbol} skipped: missing core priceData")
+                return None
+            related = {
+                "tnx": _timed_call(f"index {symbol} related ^TNX", YahooProvider.get_price, "^TNX"),
+                "vxn": _timed_call(f"index {symbol} related ^VXN", YahooProvider.get_price, "^VXN"),
+                "vix": _timed_call(f"index {symbol} related ^VIX", YahooProvider.get_price, "^VIX"),
+                "move": _timed_call(f"index {symbol} related ^MOVE", YahooProvider.get_price, "^MOVE"),
+                "fut": _timed_call(f"index {symbol} related NQ=F", YahooProvider.get_price, "NQ=F"),
+            }
+            valuation = (
+                _timed_call(
+                    f"index {symbol} valuation QQQ",
+                    ValuationProvider.get_qqq_available_valuation_yahoo,
+                )
+                if symbol == "^NDX"
+                else None
+            )
+            daily_history = _timed_call(
+                f"index {symbol} dailyHistory",
+                YahooProvider.get_history,
+                symbol,
+                period="1y",
+                interval="1d",
+            )
+            chart_history = _timed_call(
+                "index NQ=F chartHistory",
+                YahooProvider.get_history,
+                "NQ=F",
+                period="2mo",
+                interval="1d",
+            )[-30:]
+            high_52w = _timed_call(f"index {symbol} high52w", YahooProvider.get_52w_high, symbol)
+            payload = {
+                "priceData": price_data,
+                "dailyHistory": daily_history,
+                "chartHistory": chart_history,
+                "relatedPrices": related,
+                "valuation": {"qqq": valuation} if valuation else {},
+                "high52w": high_52w,
+                "_sources": {
+                    "priceData": "yahoo",
+                    "dailyHistory": "yahoo",
+                    "chartHistory": "yahoo:NQ=F",
+                    "relatedPrices": {
+                        "tnx": "yahoo:^TNX",
+                        "vxn": "yahoo:^VXN",
+                        "vix": "yahoo:^VIX",
+                        "move": "yahoo:^MOVE",
+                        "fut": "yahoo:NQ=F",
+                    },
+                    "valuation": "yahoo:QQQ",
+                    "high52w": "yahoo",
                 },
-                "valuation": "yahoo:QQQ",
-                "high52w": "yahoo",
-            },
-        }
-        return _raw_item(symbol, "index", payload, _updated_at(payload.get("priceData")))
+            }
+            return _raw_item(symbol, "index", payload, _updated_at(payload.get("priceData")))
+        finally:
+            print(f"[Timing] index {symbol} total took {perf_counter() - started_at:.2f}s")
 
     @staticmethod
     def _fetch_fx_raw(symbol: str) -> dict | None:
@@ -271,16 +311,20 @@ class RawJobScheduler:
         Created: 2026-05
         易错点: 场外基金指标只需要 price，但空 quote 不能覆盖当天已有汇率快照。
         """
+        started_at = perf_counter()
         print(f"[RawJob] Fetching FX {symbol}...")
-        price_data = YahooProvider.get_price(symbol)
-        if not _has_price_data(price_data):
-            print(f"[RawJob] FX {symbol} skipped: missing core priceData")
-            return None
-        payload = {
-            "priceData": price_data,
-            "_sources": {"priceData": "yahoo"},
-        }
-        return _raw_item(symbol, "fx", payload, _updated_at(payload.get("priceData")))
+        try:
+            price_data = _timed_call(f"fx {symbol} price", YahooProvider.get_price, symbol)
+            if not _has_price_data(price_data):
+                print(f"[RawJob] FX {symbol} skipped: missing core priceData")
+                return None
+            payload = {
+                "priceData": price_data,
+                "_sources": {"priceData": "yahoo"},
+            }
+            return _raw_item(symbol, "fx", payload, _updated_at(payload.get("priceData")))
+        finally:
+            print(f"[Timing] fx {symbol} total took {perf_counter() - started_at:.2f}s")
 
     @staticmethod
     def _fetch_etf_raw(item: dict, plan: RawFetchPlan) -> tuple[dict | None, dict | None, list[dict]]:
@@ -297,51 +341,64 @@ class RawJobScheduler:
         易错点: 增量计划不要触碰 history；ETF 历史优先新浪，只有新浪为空才 fallback 东财。
         """
         code = item["code"]
+        started_at = perf_counter()
         print(f"[RawJob] Fetching ETF {code}...")
-        realtime = AkShareProvider.get_etf_realtime(code) if plan.include_realtime else None
-        realtime_item = None
-        if realtime:
-            realtime_item = _raw_item(
-                code,
-                "etf",
-                {
-                    "realtime": realtime,
-                    "_sources": {
-                        "realtime": _etf_realtime_source(realtime),
-                    },
-                },
-                _updated_at(realtime),
+        try:
+            realtime = (
+                _timed_call(f"ETF {code} realtime", AkShareProvider.get_etf_realtime, code)
+                if plan.include_realtime
+                else None
             )
-
-        meta_item = None
-        if plan.include_meta:
-            metadata = AkShareProvider.get_fund_metadata(code)
-            inception_date = item.get("inceptionDate") or AkShareProvider.get_fund_inception_date(code, is_etf=True)
-            meta_item = _raw_item(
-                code,
-                "etf",
-                {
-                    "config": item,
-                    "metadata": metadata,
-                    "inceptionDate": inception_date,
-                    "_sources": {
-                        "config": _config_sources(item),
-                        "metadata": _metadata_sources(metadata, default_source="eastmoney"),
-                        "inceptionDate": "fund_config" if item.get("inceptionDate") else "eastmoney",
+            realtime_item = None
+            if realtime:
+                realtime_item = _raw_item(
+                    code,
+                    "etf",
+                    {
+                        "realtime": realtime,
+                        "_sources": {
+                            "realtime": _etf_realtime_source(realtime),
+                        },
                     },
-                },
-                _now_db_time(),
-            )
+                    _updated_at(realtime),
+                )
 
-        history_items = []
-        if plan.include_history:
-            history = AkShareProvider.get_etf_history_sina(code)
-            history_source = "sina"
-            if not history:
-                history = AkShareProvider.get_nav_history_em(code)
-                history_source = "eastmoney"
-            history_items = _history_items(code, "etf", history_source, history, plan.history_limit)
-        return realtime_item, meta_item, history_items
+            meta_item = None
+            if plan.include_meta:
+                metadata = _timed_call(f"ETF {code} metadata", AkShareProvider.get_fund_metadata, code)
+                inception_date = item.get("inceptionDate") or _timed_call(
+                    f"ETF {code} inceptionDate",
+                    AkShareProvider.get_fund_inception_date,
+                    code,
+                    is_etf=True,
+                )
+                meta_item = _raw_item(
+                    code,
+                    "etf",
+                    {
+                        "config": item,
+                        "metadata": metadata,
+                        "inceptionDate": inception_date,
+                        "_sources": {
+                            "config": _config_sources(item),
+                            "metadata": _metadata_sources(metadata, default_source="eastmoney"),
+                            "inceptionDate": "fund_config" if item.get("inceptionDate") else "eastmoney",
+                        },
+                    },
+                    _now_db_time(),
+                )
+
+            history_items = []
+            if plan.include_history:
+                history = _timed_call(f"ETF {code} history sina", AkShareProvider.get_etf_history_sina, code)
+                history_source = "sina"
+                if not history:
+                    history = _timed_call(f"ETF {code} history eastmoney", AkShareProvider.get_nav_history_em, code)
+                    history_source = "eastmoney"
+                history_items = _history_items(code, "etf", history_source, history, plan.history_limit)
+            return realtime_item, meta_item, history_items
+        finally:
+            print(f"[Timing] ETF {code} total took {perf_counter() - started_at:.2f}s")
 
     @staticmethod
     def _fetch_fund_raw(item: dict, plan: RawFetchPlan) -> tuple[dict | None, dict | None, list[dict]]:
@@ -358,47 +415,82 @@ class RawJobScheduler:
         易错点: 增量计划不要触碰 history；全量回填才拉 NAV 历史。
         """
         code = item["code"]
+        started_at = perf_counter()
         print(f"[RawJob] Fetching Fund {code}...")
-        estimate = AkShareProvider.get_fund_estimate_direct(code) if plan.include_realtime else None
-        realtime_item = None
-        if estimate:
-            realtime_item = _raw_item(
-                code,
-                "fund",
-                {
-                    "estimate": estimate,
-                    "_sources": {
-                        "estimate": "eastmoney",
-                    },
-                },
-                _updated_at(estimate),
+        try:
+            estimate = (
+                _timed_call(f"Fund {code} estimate", AkShareProvider.get_fund_estimate_direct, code)
+                if plan.include_realtime
+                else None
             )
-
-        meta_item = None
-        if plan.include_meta:
-            metadata = AkShareProvider.get_fund_metadata(code)
-            inception_date = item.get("inceptionDate") or AkShareProvider.get_fund_inception_date(code, is_etf=False)
-            meta_item = _raw_item(
-                code,
-                "fund",
-                {
-                    "config": item,
-                    "metadata": metadata,
-                    "inceptionDate": inception_date,
-                    "_sources": {
-                        "config": _config_sources(item),
-                        "metadata": _metadata_sources(metadata, default_source="eastmoney"),
-                        "inceptionDate": "fund_config" if item.get("inceptionDate") else "eastmoney",
+            realtime_item = None
+            if estimate:
+                realtime_item = _raw_item(
+                    code,
+                    "fund",
+                    {
+                        "estimate": estimate,
+                        "_sources": {
+                            "estimate": "eastmoney",
+                        },
                     },
-                },
-                _now_db_time(),
-            )
+                    _updated_at(estimate),
+                )
 
-        history_items = []
-        if plan.include_history:
-            history = AkShareProvider.get_fund_history_em(code)
-            history_items = _history_items(code, "fund", "eastmoney", history, plan.history_limit)
-        return realtime_item, meta_item, history_items
+            meta_item = None
+            if plan.include_meta:
+                metadata = _timed_call(f"Fund {code} metadata", AkShareProvider.get_fund_metadata, code)
+                inception_date = item.get("inceptionDate") or _timed_call(
+                    f"Fund {code} inceptionDate",
+                    AkShareProvider.get_fund_inception_date,
+                    code,
+                    is_etf=False,
+                )
+                meta_item = _raw_item(
+                    code,
+                    "fund",
+                    {
+                        "config": item,
+                        "metadata": metadata,
+                        "inceptionDate": inception_date,
+                        "_sources": {
+                            "config": _config_sources(item),
+                            "metadata": _metadata_sources(metadata, default_source="eastmoney"),
+                            "inceptionDate": "fund_config" if item.get("inceptionDate") else "eastmoney",
+                        },
+                    },
+                    _now_db_time(),
+                )
+
+            history_items = []
+            if plan.include_history:
+                history = _timed_call(f"Fund {code} history", AkShareProvider.get_fund_history_em, code)
+                history_items = _history_items(code, "fund", "eastmoney", history, plan.history_limit)
+            return realtime_item, meta_item, history_items
+        finally:
+            print(f"[Timing] Fund {code} total took {perf_counter() - started_at:.2f}s")
+
+
+def _timed_call(label: str, func, *args, **kwargs):
+    """
+    执行一个采集子步骤并打印耗时。
+
+    Args:
+        label: 日志标签，需包含资产类型、代码和 provider 子步骤，方便定位慢源。
+        func: 可调用对象；异常不吞掉，由原调用链继续处理。
+        *args: 传给 func 的位置参数；允许为空。
+        **kwargs: 传给 func 的关键字参数；允许为空。
+    Returns:
+        func 的原始返回值；失败时沿用 func 抛出的异常。
+
+    Created: 2026-05
+    易错点: 该 helper 只观测耗时，不改变异常语义；并发产品日志可能交错，排查时以 label 为准。
+    """
+    started_at = perf_counter()
+    try:
+        return func(*args, **kwargs)
+    finally:
+        print(f"[Timing] {label} took {perf_counter() - started_at:.2f}s")
 
 
 def _raw_item(symbol: str, asset_type: str, payload: dict, updated_at: str | None = None) -> dict:
@@ -506,7 +598,7 @@ def _config_sources(config: dict) -> dict:
     标注静态配置字段来源。
 
     Args:
-        config: funds.json 或 fund-configs 返回的配置项。
+        config: fund-configs 返回的配置项。
     Returns:
         {field: source} 形式的来源映射。
 
