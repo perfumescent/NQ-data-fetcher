@@ -9,7 +9,7 @@ on:
 jobs:
   run-fetcher:
     runs-on: ubuntu-latest
-    timeout-minutes: 75   # Safety timeout: 1 hour loop + buffer for setup
+    timeout-minutes: 70   # Safety timeout: 1 hour loop + buffer for setup
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
