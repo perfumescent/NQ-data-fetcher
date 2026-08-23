@@ -15,8 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.jobs.schedulers import RawJobScheduler
 from src.jobs.raw_push import push_raw_payload
 
-INTERVAL_SECONDS = 120
-
+INTERVAL_SECONDS = 60
 
 def main():
     """
