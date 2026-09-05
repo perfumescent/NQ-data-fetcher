@@ -493,10 +493,44 @@ class AkShareProvider:
         return None
 
     @staticmethod
+    def _parse_quota_amount(sgzt: str, maxsg, quota_display: str | None) -> float | None:
+        """
+        将基金申购状态和最大申购额标准化为可排序的人民币金额。
+
+        Args:
+            sgzt: 申购状态字符串；包含“暂停”时只有确认暂停才映射为 0。
+            maxsg: 上游单日最大申购额，单位元；非数值、非正数表示无明确金额。
+            quota_display: `_parse_quota` 已生成的展示文本；None 表示动态值冲突或无法识别。
+        Returns:
+            单日限购金额（元）；暂停申购返回 0.0，正常申购或无法确认金额返回 None。
+
+        Created: 2026-08
+        易错点: 上游可能同时给“暂停申购”和正数 MAXSG；此时 quota_display 为 None，必须保留 None 让静态配置兜底。
+        """
+        if quota_display is None:
+            return None
+        if quota_display == "暂停":
+            return 0.0
+        if quota_display == "正常":
+            return None
+        try:
+            amount = float(maxsg)
+        except (ValueError, TypeError):
+            return None
+        return amount if amount > 0 else None
+
+    @staticmethod
     def _fetch_fund_info_fallback(code: str) -> dict:
         """
-        Fallback API: EastMoney Mobile API (FundMNBasicInformation)
-        Returns dict with keys: "fundSize" (亿元), "inceptionDate" (YYYY-MM-DD), "quota" (str)
+        从东方财富移动端接口补充基金规模、成立日和限购信息。
+
+        Args:
+            code: 六位场外基金代码。
+        Returns:
+            可包含 fundSize（亿元）、inceptionDate、quota（展示文本）与 quotaAmount（人民币元）的字典；请求失败返回空字典。
+
+        Created: 2025-11
+        易错点: quota 与 quotaAmount 必须成对保留展示语义和排序数值；“正常”没有有限金额，因此不写 quotaAmount。
         """
         url = f"https://fundmobapi.eastmoney.com/FundMNewApi/FundMNBasicInformation?FCODE={code}&deviceid=1&plat=Iphone&product=EFund&version=6.6.6"
         res = {}
@@ -520,6 +554,13 @@ class AkShareProvider:
                 quota_str = AkShareProvider._parse_quota(info.get("SGZT"), info.get("MAXSG"), code)
                 if quota_str is not None:
                     res["quota"] = quota_str
+                quota_amount = AkShareProvider._parse_quota_amount(
+                    info.get("SGZT"),
+                    info.get("MAXSG"),
+                    quota_str,
+                )
+                if quota_amount is not None:
+                    res["quotaAmount"] = quota_amount
 
         except Exception as e:
             print(f"[WARN] Fallback Info fetch failed for {code}: {e}")
@@ -562,8 +603,15 @@ class AkShareProvider:
     @staticmethod
     def get_fund_metadata(code: str) -> dict:
         """
-        Get extra fund metadata (Returns, Size, etc) from EastMoney.
-        Returns: { "yearChange": float, "sixMonthChange": float, "fundSize": float (亿元) }
+        从东方财富获取基金收益、规模与限购等低频元数据。
+
+        Args:
+            code: 六位基金代码。
+        Returns:
+            元数据字典；fundSize 单位亿元，quotaAmount 单位人民币元，quota 为展示文本；字段缺失时省略对应键。
+
+        Created: 2025-11
+        易错点: quotaAmount 必须保持数值进入 raw meta，不能只保留带“万/亿”的 quota 展示字符串，否则客户端排序会退化为字典序。
         """
         url = f"http://fund.eastmoney.com/pingzhongdata/{code}.js"
         res = {}
@@ -604,6 +652,8 @@ class AkShareProvider:
             res["fundSize"] = fallback["fundSize"]
         if fallback.get("quota"):
             res["quota"] = fallback["quota"]
+        if fallback.get("quotaAmount") is not None:
+            res["quotaAmount"] = fallback["quotaAmount"]
 
         print(f"[Metadata] {code} final quota={res.get('quota')!r}")
         return res
