@@ -1,3 +1,3 @@
 # NQ-Signal Data Fetcher
 
-Local data fetching service for NQ-Signal. Testing
+Local data fetching service for NQ-Signal.
