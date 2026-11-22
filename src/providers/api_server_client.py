@@ -9,6 +9,7 @@ data_fetcher 与 api_server 通信的 HTTP 客户端。
 """
 
 import json
+import math
 import os
 from time import perf_counter
 from urllib.parse import urlparse
@@ -200,7 +201,10 @@ class APIServerClient:
             True 表示 api_server 返回 200；False 表示请求失败或服务端拒绝。
 
         Created: 2026-05
-        易错点: 全量 backfill 的 history payload 会很大，必须分片 POST，避免 nginx 413 Request Entity Too Large。
+        易错点: legacy点按500条分片，新完整源表逐项POST；Server独占按日期分桶职责，
+            不可为控制请求大小在Fetcher删除字段、截断行或把NAV当价格。空/失败源不可作为清空更新。
+            完整源表使用ETF_HISTORY_INGEST_TIMEOUT_SECONDS（默认180，有限正数）；legacy仍20秒，
+            超时返回False且不确认恢复成功，服务端可能已提交，下一轮依赖幂等重试。
         """
         items = payload.get("items", [])
         if not isinstance(items, list):
@@ -209,19 +213,51 @@ class APIServerClient:
             print("[RawData] history skipped: no items")
             return True
 
+        has_source_tables = any(
+            isinstance(item, dict) and isinstance(item.get("rawPayload"), dict)
+            and isinstance(item["rawPayload"].get("histories"), list)
+            for item in items
+        )
+        history_timeout = 20.0
+        if has_source_tables:
+            try:
+                history_timeout = float(os.getenv("ETF_HISTORY_INGEST_TIMEOUT_SECONDS", "180"))
+                if not math.isfinite(history_timeout) or history_timeout <= 0:
+                    raise ValueError("Expected a finite positive ingest timeout")
+            except (TypeError, ValueError):
+                print("[RawData] ETF_HISTORY_INGEST_TIMEOUT_SECONDS must be a finite positive number")
+                return False
+
+        # A complete source table can be much larger than a legacy t/p item. Keep one
+        # table per POST; the server owns date partitioning and dataset-safe merging.
+        chunks = []
+        legacy_chunk = []
+        for item in items:
+            raw = item.get("rawPayload", {}) if isinstance(item, dict) else {}
+            if isinstance(raw, dict) and isinstance(raw.get("histories"), list):
+                if legacy_chunk:
+                    chunks.append(legacy_chunk)
+                    legacy_chunk = []
+                chunks.append([item])
+            else:
+                legacy_chunk.append(item)
+                if len(legacy_chunk) >= _RAW_HISTORY_CHUNK_SIZE:
+                    chunks.append(legacy_chunk)
+                    legacy_chunk = []
+        if legacy_chunk:
+            chunks.append(legacy_chunk)
         ok = True
-        total = len(items)
-        for start in range(0, total, _RAW_HISTORY_CHUNK_SIZE):
-            chunk = items[start:start + _RAW_HISTORY_CHUNK_SIZE]
-            chunk_no = start // _RAW_HISTORY_CHUNK_SIZE + 1
-            chunk_total = (total + _RAW_HISTORY_CHUNK_SIZE - 1) // _RAW_HISTORY_CHUNK_SIZE
-            label = f"history chunk {chunk_no}/{chunk_total}"
-            if not APIServerClient._post_raw(_RAW_HISTORY_URL, {"items": chunk}, label):
+        for chunk_no, chunk in enumerate(chunks, start=1):
+            label = f"history chunk {chunk_no}/{len(chunks)}"
+            raw = chunk[0].get("rawPayload", {}) if isinstance(chunk[0], dict) else {}
+            source_chunk = isinstance(raw, dict) and isinstance(raw.get("histories"), list)
+            timeout = history_timeout if source_chunk else 20.0
+            if not APIServerClient._post_raw(_RAW_HISTORY_URL, {"items": chunk}, label, timeout_seconds=timeout):
                 ok = False
         return ok
 
     @staticmethod
-    def _post_raw(url: str, payload: dict, label: str) -> bool:
+    def _post_raw(url: str, payload: dict, label: str, timeout_seconds: float = 20) -> bool:
         """
         执行 raw POST 请求。
 
@@ -229,15 +265,21 @@ class APIServerClient:
             url: internal raw ingest URL。
             payload: JSON payload。
             label: 日志标签。
+            timeout_seconds: 有限正数，HTTP请求超时秒数；默认20保持旧槽位行为。
         Returns:
-            True 表示成功；False 表示失败。
+            True 表示HTTP 200且可解析响应；False表示参数无效、非200或请求异常。
 
         Created: 2026-05
-        易错点: 这里不 raise，避免 raw 单路失败导致 data_fetcher 整个循环退出。
+        易错点: 这里不raise，避免单路失败击穿分钟循环。完整histories可含上千日期分区，
+            应由调用方显式传较长超时；HTTP超时不代表服务端未提交，重试必须依赖幂等合并。
         """
+        if (not isinstance(timeout_seconds, (int, float))
+                or not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
+            print(f"[RawData] {label} push skipped: invalid timeout")
+            return False
         started_at = perf_counter()
         try:
-            resp = requests.post(url, json=payload, timeout=20)
+            resp = requests.post(url, json=payload, timeout=timeout_seconds)
             if resp.status_code == 200:
                 print(f"[RawData] {label} push succeeded: {resp.json()}")
                 return True

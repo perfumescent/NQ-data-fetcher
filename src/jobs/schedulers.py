@@ -6,6 +6,7 @@ from src.providers.api_server_client import APIServerClient
 from src.providers.yahoo import YahooProvider
 from src.providers.akshare_api import AkShareProvider
 from src.providers.valuation import ValuationProvider
+from src.jobs.etf_history import fetch_backfill_items
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,8 @@ class RawJobScheduler:
         Args:
             无。
         Returns:
-            {"realtime": [...], "meta": [...], "history": [...]}，history 为全量 provider 历史点。
+            {"realtime": [...], "meta": [...], "history": [...]}；已核实ETF返回完整价格SDK源表与净值HTTP源表，
+            其余既有产品沿用兼容历史信封。
 
         Created: 2026-05
         易错点: 本方法可能产生大量 history item，只能由主动回填入口调用；指数历史必须用 Yahoo max，不要写死 10y。
@@ -313,7 +315,8 @@ class RawJobScheduler:
             (quote item 或 None, meta item 或 None, daily items)。
 
         Created: 2026-05
-        易错点: 增量计划不要触碰 history；ETF 历史优先新浪，只有新浪为空才 fallback 东财。
+        易错点: 分钟计划不碰history；已核实ETF回填保留完整价格SDK/NAV HTTP源表并由Server分日，
+            其他旧产品仅保留新浪价格格式兼容。价格失败绝不能用净值替代。
         """
         code = item["code"]
         started_at = perf_counter()
@@ -365,12 +368,12 @@ class RawJobScheduler:
 
             history_items = []
             if plan.include_history:
-                history = _timed_call(f"ETF {code} history sina", AkShareProvider.get_etf_history_sina, code)
-                history_source = "sina"
-                if not history:
-                    history = _timed_call(f"ETF {code} history eastmoney", AkShareProvider.get_nav_history_em, code)
-                    history_source = "eastmoney"
-                history_items = _history_items(code, "etf", history_source, history, plan.history_limit)
+                if item.get("premiumEligible") is True:
+                    history_items = fetch_backfill_items(item)
+                else:
+                    # Existing non-report consumers keep the legacy price-only history format.
+                    history = _timed_call(f"ETF {code} history sina", AkShareProvider.get_etf_history_sina, code)
+                    history_items = _history_items(code, "etf", "sina", history, plan.history_limit)
             return realtime_item, meta_item, history_items
         finally:
             print(f"[Timing] ETF {code} total took {perf_counter() - started_at:.2f}s")

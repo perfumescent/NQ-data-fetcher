@@ -14,22 +14,25 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.jobs.schedulers import RawJobScheduler
 from src.jobs.raw_push import push_raw_payload
+from src.jobs.etf_history import ETFHistoryJob, ETFHistoryPolicy
 
 INTERVAL_SECONDS = 60
 
-def main():
+def main() -> None:
     """
     启动 Pragmatic ELT 增量 data_fetcher 常驻循环。
 
     Args:
         无。
     Returns:
-        None；进程常驻，每轮只采 realtime/meta 增量数据。
+        None；进程常驻，分钟循环只采 realtime/meta；可选独立后台线程低频回补ETF历史。
 
     Created: 2026-05
-    易错点: 本入口永远常驻运行，严禁加参数分支；初始化或修复历史请运行 src.backfill。
+    易错点: 本入口永远常驻运行，分钟循环不可拉全历史；ETF历史任务通过独立策略开关启用，
+        启动恢复与低频补取不依赖分钟循环或持久水位。手动全量修复可运行 src.etf_history。
     """
     print("Starting Pragmatic ELT Incremental Pusher...")
+    ETFHistoryJob(ETFHistoryPolicy.from_environment()).start()
 
     while True:
         try:
