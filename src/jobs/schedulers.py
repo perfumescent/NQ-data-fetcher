@@ -7,6 +7,7 @@ from src.providers.yahoo import YahooProvider
 from src.providers.akshare_api import AkShareProvider
 from src.providers.valuation import ValuationProvider
 from src.jobs.etf_history import fetch_backfill_items
+from src.providers.nasdaq import NasdaqProvider
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,9 @@ class RawJobScheduler:
         history_items = []
 
         if plan.include_realtime:
+            constituents = NasdaqProvider.get_constituents_raw()
+            if constituents:
+                realtime_items.append(constituents)
             realtime_items.extend([
                 RawJobScheduler._fetch_index_raw("^NDX"),
                 RawJobScheduler._fetch_fx_raw("CNY=X"),

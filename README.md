@@ -122,6 +122,13 @@ not establish complete 52-week coverage: Server checks independent calendars,
 pair validity, dates, corporate actions and share units before publishing a
 percentile. No probe writes to production ingest.
 
+## Nasdaq-100 constituent snapshot
+
+The regular poll fetches the Nasdaq constituent table at most once every five
+minutes. The complete decoded JSON response is sent as rawPayload.nasdaqResponse
+under ^NDX:CONSTITUENTS. The server validates the snapshot before replacing the
+last valid one and derives the display values.
+
 ## Offline checks
 
 ```bash
