@@ -1,8 +1,11 @@
+import json
+
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from ..core.cache import price_cache, chart_cache, indicator_cache, high52w_cache
 from cachetools import cached
+from cachetools.keys import hashkey
 
 
 def _fast_info_value(fast, *names):
@@ -186,6 +189,50 @@ class YahooProvider:
         except Exception as e:
             print(f"[Error] Yahoo get_intraday {symbol}: {e}")
             return []
+
+    @staticmethod
+    @cached(chart_cache, key=lambda symbol, interval="1d", period="max", lookback_days=None: hashkey("raw_history", symbol, interval, period, lookback_days))
+    def get_raw_history(symbol: str, interval: str = "1d", period: str = "max", lookback_days: int | None = None) -> dict | None:
+        """
+        完整序列化 Yahoo SDK 返回的行情表，不筛列、删行或生成展示数据。
+
+        Args:
+            symbol: Yahoo 产品代码；不绑定具体页面。
+            interval: 数据源采样粒度，如 1d、5m；不表示 App 的显示区间。
+            period: 数据源支持的取数范围，默认 max；lookback_days 非 None 时改用 start。
+            lookback_days: 源接口保留期内的回看天数；5m 采集使用 59 天避开 60 天限制边界。
+        Returns:
+            yahoo-history-v1 信封，含完整 columns/index/data、原时区、请求参数；请求失败返回 None。
+
+        Created: 2026-09
+        易错点: keepna 保留缺失行，prepost 保留源返回的盘前盘后；关闭复权、修复和舍入。
+            JSON 不支持 NaN/Infinity，序列化为 null 但保留所在行列；源索引保留时区偏移，不转 UTC。
+            SDK 表并非 Yahoo HTTP 响应原文；不得声称保留了 SDK 未返回的字段。
+        """
+        request = {
+            "period": period, "interval": interval, "prepost": True, "actions": True,
+            "auto_adjust": False, "back_adjust": False, "repair": False,
+            "keepna": True, "rounding": False,
+        }
+        if lookback_days is not None:
+            request.pop("period")
+            request["start"] = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).date().isoformat()
+        try:
+            history = yf.Ticker(symbol).history(**request)
+            return {
+                "format": "yahoo-history-v1",
+                "source": "yahoo",
+                "symbol": symbol,
+                "interval": interval,
+                "request": request,
+                "timezone": str(history.index.tz) if getattr(history.index, "tz", None) is not None else None,
+                "columns": list(history.columns),
+                "index": [t.isoformat() if hasattr(t, "isoformat") else str(t) for t in history.index],
+                "data": json.loads(history.to_json(orient="values", double_precision=15)),
+            }
+        except Exception as error:
+            print(f"[Error] Yahoo get_raw_history {symbol}: {error}")
+            return None
 
     @staticmethod
     @cached(chart_cache)

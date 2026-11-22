@@ -122,7 +122,7 @@ class RawJobScheduler:
             {"realtime": [...], "meta": [...], "history": [...]}，可直接推送到 raw ingest 接口。
 
         Created: 2026-05
-        易错点: provider 层已经做了最小标准化；调度层只决定拉哪些槽位，不拼 subtitle、不算 RSI/MA。
+        易错点: Yahoo 历史仅做传输序列化，保留源行列；调度层不能按页面筛列、截点或清洗，统一交由 server 读取后处理。
         """
         fetch_started_at = perf_counter()
         conf = _timed_call("fetch config", RawJobScheduler._load_config)
@@ -137,25 +137,12 @@ class RawJobScheduler:
                 RawJobScheduler._fetch_fx_raw("CNY=X"),
             ])
         if plan.include_history:
-            history_items.extend(
-                _history_items(
-                    "^NDX",
+            for history_symbol in ["^NDX", "^VXN", "^VIX", "^MOVE", "^TNX"]:
+                history_items.extend(_raw_history_items(
+                    history_symbol,
                     "index",
-                    "yahoo",
-                    YahooProvider.get_history("^NDX", period="max", interval="1d"),
-                    plan.history_limit,
-                )
-            )
-            for related_symbol in ["^VXN", "^VIX", "^MOVE", "^TNX"]:
-                history_items.extend(
-                    _history_items(
-                        related_symbol,
-                        "index",
-                        "yahoo",
-                        YahooProvider.get_history(related_symbol, period="max", interval="1d"),
-                        plan.history_limit,
-                    )
-                )
+                    YahooProvider.get_raw_history(history_symbol, interval="1d", period="max"),
+                ))
 
         etf_items = conf.get("etf", [])
         fund_items = conf.get("fund", [])
@@ -230,10 +217,10 @@ class RawJobScheduler:
         Args:
             symbol: 指数代码，当前为 ^NDX。
         Returns:
-            单表快照中的 quote 槽位 item；核心 priceData 缺失时返回 None。
+            单表 quote 槽位 item，histories 统一保存不同 symbol/interval 的完整源表；核心 priceData 缺失时返回 None。
 
         Created: 2026-05
-        易错点: dailyHistory 用于 api_server 计算 RSI/MA；priceData 缺失时不能推送，否则会覆盖 DB 中当天有效 quote。
+        易错点: 指数及关联标的的日线用有界滚动窗口，完整历史由主动回填负责；不按页面截点。业务读取适配只在 server 执行。
         """
         started_at = perf_counter()
         print(f"[RawJob] Fetching Index {symbol}...")
@@ -257,32 +244,21 @@ class RawJobScheduler:
                 if symbol == "^NDX"
                 else None
             )
-            daily_history = _timed_call(
-                f"index {symbol} dailyHistory",
-                YahooProvider.get_history,
-                symbol,
-                period="1y",
-                interval="1d",
-            )
-            chart_history = _timed_call(
-                "index NQ=F chartHistory",
-                YahooProvider.get_history,
-                "NQ=F",
-                period="2mo",
-                interval="1d",
-            )[-30:]
-            high_52w = _timed_call(f"index {symbol} high52w", YahooProvider.get_52w_high, symbol)
+            histories = [
+                _timed_call(f"index {history_symbol} raw history 1d", YahooProvider.get_raw_history, history_symbol, interval="1d", period="1y")
+                for history_symbol in (symbol, "NQ=F", "^VXN", "^VIX", "^MOVE")
+            ]
+            histories.append(_timed_call(
+                f"index {symbol} raw history 5m", YahooProvider.get_raw_history, symbol, interval="5m", lookback_days=59,
+            ))
             payload = {
                 "priceData": price_data,
-                "dailyHistory": daily_history,
-                "chartHistory": chart_history,
+                "histories": histories,
                 "relatedPrices": related,
                 "valuation": {"qqq": valuation} if valuation else {},
-                "high52w": high_52w,
                 "_sources": {
                     "priceData": "yahoo",
-                    "dailyHistory": "yahoo",
-                    "chartHistory": "yahoo:NQ=F",
+                    "histories": "yahoo:history",
                     "relatedPrices": {
                         "tnx": "yahoo:^TNX",
                         "vxn": "yahoo:^VXN",
@@ -291,7 +267,6 @@ class RawJobScheduler:
                         "fut": "yahoo:NQ=F",
                     },
                     "valuation": "yahoo:QQQ",
-                    "high52w": "yahoo",
                 },
             }
             return _raw_item(symbol, "index", payload, _updated_at(payload.get("priceData")))
@@ -535,6 +510,34 @@ def _has_price_data(payload: dict | None) -> bool:
         return float(payload.get("price")) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _raw_history_items(symbol: str, asset_type: str, history: dict | None) -> list[dict]:
+    """
+    按现有按日写入键拆包完整源表，保留每行全部字段和原始索引。
+
+    Args:
+        symbol: 产品代码，写入信封标识。
+        asset_type: 资产类型，如 index；不影响源数据内容。
+        history: get_raw_history 返回的 1d 源表；None 表示请求失败，返回空列表。
+    Returns:
+        现有 raw/history 接口的 item 列表；每项 histories 含同格式的一行源表，不新增表或槽位。
+    Created: 2026-09
+    易错点: date 只用于数据库分区键；无效价格及未知列也必须原样随行写入，不能做业务过滤。
+        只在手动 backfill 使用，不在分钟增量循环重写全量日线。
+    """
+    if history is None:
+        return []
+    return [
+        {
+            "symbol": symbol, "assetType": asset_type, "date": str(stamp)[:10],
+            "rawPayload": {
+                "histories": [{**history, "index": [stamp], "data": [values]}],
+                "_sources": {"histories": "yahoo:history"},
+            },
+        }
+        for stamp, values in zip(history["index"], history["data"])
+    ]
 
 
 def _history_items(symbol: str, asset_type: str, source: str, points: list[dict], limit: int | None) -> list[dict]:
