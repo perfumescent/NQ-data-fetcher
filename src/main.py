@@ -28,8 +28,8 @@ def main() -> None:
         None；进程常驻，分钟循环只采 realtime/meta；可选独立后台线程低频回补ETF历史。
 
     Created: 2026-05
-    易错点: 本入口永远常驻运行，分钟循环不可拉全历史；ETF历史任务通过独立策略开关启用，
-        启动恢复与低频补取不依赖分钟循环或持久水位。手动全量修复可运行 src.etf_history。
+    易错点: 分钟循环只采集增量，ETF 历史在独立线程启动恢复并低频补取。
+        重启不依赖持久水位，手动全量修复可运行 src.etf_history。
     """
     print("Starting Pragmatic ELT Incremental Pusher...")
     ETFHistoryJob(ETFHistoryPolicy.from_environment()).start()

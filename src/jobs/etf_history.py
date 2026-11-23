@@ -16,7 +16,6 @@ from src.providers.etf_history import DATASETS, HistorySourceResult, fetch_sourc
 class ETFHistoryPolicy:
     """Source retention/reconciliation policy, independent from report windows and UI point counts."""
 
-    enabled: bool = False
     interval_seconds: int = 21600
     overlap_days: int = 14
     reconcile_days: int = 7
@@ -34,11 +33,9 @@ class ETFHistoryPolicy:
             Validated immutable policy; invalid values raise ValueError before any network call.
 
         Created: 2026-10
-        易错点: Defaults keep the optional background job disabled until the source-table ingest
-            is deployed. A minimum hourly interval prevents accidental minute-scale full history.
+        易错点: A minimum hourly interval keeps history collection independent of minute quotes.
         """
         policy = cls(
-            enabled=os.getenv("ETF_HISTORY_ENABLED", "false").lower() in ("1", "true", "yes"),
             interval_seconds=int(os.getenv("ETF_HISTORY_INTERVAL_SECONDS", "21600")),
             overlap_days=int(os.getenv("ETF_HISTORY_OVERLAP_DAYS", "14")),
             reconcile_days=int(os.getenv("ETF_HISTORY_RECONCILE_DAYS", "7")),
@@ -122,8 +119,7 @@ def fetch_backfill_items(item: dict, policy: ETFHistoryPolicy | None = None) -> 
         Zero to two complete source-table HTTP items; each dataset failure is logged independently.
 
     Created: 2026-10
-    易错点: Explicit backfill works even if the optional background job is disabled. Failed
-        prices never use NAV as fallback, and a successful dataset survives the other's failure.
+    易错点: Failed prices never use NAV as fallback, and a successful dataset survives the other's failure.
     """
     selected = eligible_etfs({"etf": [item]})
     if not selected:
@@ -181,9 +177,9 @@ class ETFHistoryJob:
 
         Args:
             now: Offset-aware scheduling clock, or UTC now; force: explicit one-shot backfill
-                bypassing enabled/due checks. A naive clock raises ValueError.
+                bypassing the scheduled due time. A naive clock raises ValueError.
         Returns:
-            Counts {attempted, ingested, failed}; all zero means disabled/not due/already running.
+            Counts {attempted, ingested, failed}; all zero means no eligible work, not due, or already running.
 
         Created: 2026-10
         易错点: Every unseen/failed full source dataset stays in recovery mode. A short overlap
@@ -193,7 +189,7 @@ class ETFHistoryJob:
         if current.utcoffset() is None:
             raise ValueError("History scheduling clock must include an offset")
         counts = {"attempted": 0, "ingested": 0, "failed": 0}
-        if not force and (not self.policy.enabled or (self._next_due and current < self._next_due)):
+        if not force and self._next_due is not None and current < self._next_due:
             return counts
         if not self._lock.acquire(blocking=False):
             return counts
@@ -238,20 +234,18 @@ class ETFHistoryJob:
         finally:
             self._lock.release()
 
-    def start(self) -> threading.Thread | None:
-        """Start an optional background worker without delaying the existing minute quote loop.
+    def start(self) -> threading.Thread:
+        """Start the background history worker alongside the minute quote loop.
 
         Args:
-            self: Job instance with policy.enabled; no external arguments.
+            self: History job instance; no external arguments.
         Returns:
-            Daemon Thread when enabled, otherwise None. The thread begins with full recovery.
+            Daemon Thread that begins with full recovery.
 
         Created: 2026-10
         易错点: The background job must never call fetch_incremental_raw or reuse its cycle
             cache. Source subprocess deadlines prevent permanent historical-source stalls.
         """
-        if not self.policy.enabled:
-            return None
         thread = threading.Thread(target=self._run, name="etf-source-history", daemon=True)
         thread.start()
         return thread

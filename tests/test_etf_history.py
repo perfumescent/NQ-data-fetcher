@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from src.jobs.etf_history import ETFHistoryJob, ETFHistoryPolicy, eligible_etfs, source_history_item
+from src.jobs.etf_history import ETFHistoryJob, ETFHistoryPolicy, source_history_item
 from src.providers.api_server_client import APIServerClient
 from src.providers.eastmoney_nav import fetch_nav_table
 from src.providers.etf_history import HistorySourceResult, fetch_source_table, serialize_sdk_table
@@ -221,7 +221,7 @@ class RecoveryTests(unittest.TestCase):
 
         Args:
             self: Test case; fetch_source/push_history: optional injectable callables; policy:
-                optional acquisition policy, or enabled defaults with a single worker.
+                optional acquisition policy, or defaults with a single worker.
         Returns:
             New job; source calls return successful complete fixture tables by default.
 
@@ -230,7 +230,7 @@ class RecoveryTests(unittest.TestCase):
         """
         source = fetch_source or Mock(side_effect=lambda code, dataset, *args, **kwargs:
                                       HistorySourceResult(code, dataset, table_for(code, dataset)))
-        return ETFHistoryJob(policy or ETFHistoryPolicy(enabled=True, workers=1),
+        return ETFHistoryJob(policy or ETFHistoryPolicy(workers=1),
                              load_config=Mock(return_value={"etf": [{"code": "159696", "premiumEligible": True}]}),
                              fetch_source=source, push_history=push_history or Mock(return_value=True))
 
@@ -323,24 +323,25 @@ class RecoveryTests(unittest.TestCase):
         self.assertIsNone(item["updatedAt"])
         self.assertEqual(item["rawPayload"]["histories"][0]["data"][0][0], "2026-10-21")
 
-    def test_feature_disabled_and_unverified_config_do_no_work(self):
-        """Verify opt-in scheduling and verified existing universe boundaries.
+    def test_default_recovery_uses_verified_funds(self):
+        """Verify default history recovery and the fund eligibility boundary.
 
         Args:
             self: Test case with LOF/unverified/duplicate ETF config entries.
         Returns:
-            None; disabled jobs make no source requests and strict eligibility excludes other products.
+            None; default scheduling collects both datasets for the verified ETF only.
 
         Created: 2026-10
         易错点: String true and integer 1 do not prove a verified ETF classification.
         """
-        job = self.make_job(policy=ETFHistoryPolicy())
-        self.assertEqual(job.run_due()["attempted"], 0)
-        job.fetch_source.assert_not_called()
+        with patch.dict("os.environ", {}, clear=True):
+            job = self.make_job(policy=ETFHistoryPolicy.from_environment())
         rows = [{"code": "161128"}, {"code": "159660", "premiumEligible": "true"},
                 {"code": "159696", "premiumEligible": True}, {"code": "159696", "premiumEligible": True},
                 {"code": "159632", "premiumEligible": 1}]
-        self.assertEqual([item["code"] for item in eligible_etfs({"etf": rows})], ["159696"])
+        job.load_config.return_value = {"etf": rows}
+        self.assertEqual(job.run_due(), {"attempted": 2, "ingested": 2, "failed": 0})
+        self.assertEqual([call.args[0] for call in job.fetch_source.call_args_list], ["159696", "159696"])
 
     def test_policy_rejects_minute_scale_history(self):
         """Verify policy validation prevents accidental minute-scale history acquisition.

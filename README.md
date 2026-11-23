@@ -24,16 +24,14 @@ source or HTTP failure so an operator can retry. Repeated runs are idempotent
 at Server ingest. `src.backfill` also routes the verified ETFs to this complete
 source-table collector while preserving its existing other-asset behavior.
 
-The existing minute service can additionally run a separate background history
-worker, enabled explicitly after initial ingest verification:
+The minute service also starts a separate background ETF history worker.
 
 ```bash
-ETF_HISTORY_ENABLED=true uv run python -m src.main
+uv run python -m src.main
 ```
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ETF_HISTORY_ENABLED` | `false` | Enable independent background history worker |
 | `ETF_HISTORY_INTERVAL_SECONDS` | `21600` | Six-hour source check; minimum one hour |
 | `ETF_HISTORY_OVERLAP_DAYS` | `14` | Inclusive recent request overlap for late NAV/revisions |
 | `ETF_HISTORY_RECONCILE_DAYS` | `7` | Full retained source history reconciliation interval |
