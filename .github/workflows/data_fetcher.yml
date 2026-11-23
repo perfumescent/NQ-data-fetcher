@@ -2,14 +2,14 @@ name: Data Fetcher Cron
 
 on:
   schedule:
-    - cron: "0 * * * *"   # Every hour (actual scheduling handled inside the job)
-    
+    - cron: "17 * * * *"  # Hourly, away from the top-of-hour scheduling peak
+
   workflow_dispatch:      # Enable manual trigger from GitHub Actions tab
 
 jobs:
   run-fetcher:
     runs-on: ubuntu-latest
-    timeout-minutes: 70   # Safety timeout: 1 hour loop + buffer for setup
+    timeout-minutes: 70   # Bounds the lifetime of the continuous fetcher
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -23,11 +23,9 @@ jobs:
       - name: Set up Python
         run: uv python install 3.13
 
-      - name: Run Data Fetcher (loop 12 times, ~5 min apart)
+      - name: Run continuous Data Fetcher
         env:
           REMOTE_API_URL: ${{ secrets.REMOTE_API_URL }}
-          RUN_ONCE: "1"
           PYTHONUNBUFFERED: "1"
         run: |
           uv run --python 3.13 src/main.py
-          
