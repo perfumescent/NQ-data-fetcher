@@ -527,19 +527,20 @@ class AkShareProvider:
         Args:
             code: 六位场外基金代码。
         Returns:
-            可包含 fundSize（亿元）、inceptionDate、quota（展示文本）与 quotaAmount（人民币元）的字典；请求失败返回空字典。
+            包含东方财富原始 JSON 响应及可用的规模、成立日和限购兼容字段；HTTP 或 JSON 解析失败返回空字典。
 
         Created: 2025-11
-        易错点: quota 与 quotaAmount 必须成对保留展示语义和排序数值；“正常”没有有限金额，因此不写 quotaAmount。
+        易错点: SGZT 和 MAXSG 可以同时给出暂停与旧金额，须保留完整响应供 Server 判断。
         """
         url = f"https://fundmobapi.eastmoney.com/FundMNewApi/FundMNBasicInformation?FCODE={code}&deviceid=1&plat=Iphone&product=EFund&version=6.6.6"
         res = {}
         try:
             r = session.get(url, headers=HEADERS, timeout=15)
+            r.raise_for_status()
             data = r.json()
-            if data and "Datas" in data:
-                info = data["Datas"]
-
+            res["eastmoneyBasicInformation"] = data
+            info = data.get("Datas") if isinstance(data, dict) else None
+            if isinstance(info, dict) and info:
                 end_nav = info.get("ENDNAV")
                 if end_nav:
                     try:
@@ -601,17 +602,18 @@ class AkShareProvider:
         return date_str
 
     @staticmethod
-    def get_fund_metadata(code: str) -> dict:
+    def get_fund_metadata(code: str, include_basic_information: bool = False) -> dict:
         """
         从东方财富获取基金收益、规模与限购等低频元数据。
 
         Args:
             code: 六位基金代码。
+            include_basic_information: 场外基金传 True，随元数据保留移动端接口的完整 JSON 响应。
         Returns:
-            元数据字典；fundSize 单位亿元，quotaAmount 单位人民币元，quota 为展示文本；字段缺失时省略对应键。
+            元数据字典；包含已有兼容字段。启用原始响应时附加 eastmoneyBasicInformation，取不到时为 None。
 
         Created: 2025-11
-        易错点: quotaAmount 必须保持数值进入 raw meta，不能只保留带“万/亿”的 quota 展示字符串，否则客户端排序会退化为字典序。
+        易错点: 发布净值和日涨跌取自同一源响应。兼容字段继续支持部署顺序不同的旧 Server。
         """
         url = f"http://fund.eastmoney.com/pingzhongdata/{code}.js"
         res = {}
@@ -648,6 +650,8 @@ class AkShareProvider:
             print(f"[WARN] Fund metadata fetch failed for {code}: {e}")
 
         fallback = AkShareProvider._fetch_fund_info_fallback(code)
+        if include_basic_information:
+            res["eastmoneyBasicInformation"] = fallback.get("eastmoneyBasicInformation")
         if not res.get("fundSize") and fallback.get("fundSize"):
             res["fundSize"] = fallback["fundSize"]
         if fallback.get("quota"):

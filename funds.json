@@ -9,6 +9,36 @@
             "premiumEligible": false
         },
         {
+            "code": "159941",
+            "name": "广发",
+            "fee": 0.01,
+            "trackingError": null,
+            "inceptionDate": null,
+            "premiumEligible": true,
+            "premiumBenchmark": "nasdaq100",
+            "listingDate": "2015-07-13",
+            "premiumCurrency": "CNY",
+            "premiumShareUnit": "fund-share",
+            "premiumValuationCalendar": "CN",
+            "premiumValuationCalendarNote": "严格配对完整性按境内交易日检查，不代表基金法定估值日历。",
+            "premiumMetadataSource": "https://www.gffunds.com.cn/jjgg/flwj/202506/P020250624334641896472.pdf"
+        },
+        {
+            "code": "513100",
+            "name": "国泰",
+            "fee": 0.008,
+            "trackingError": null,
+            "inceptionDate": null,
+            "premiumEligible": true,
+            "premiumBenchmark": "nasdaq100",
+            "listingDate": "2013-05-15",
+            "premiumCurrency": "CNY",
+            "premiumShareUnit": "fund-share",
+            "premiumValuationCalendar": "CN",
+            "premiumValuationCalendarNote": "严格配对完整性按境内交易日检查，不代表基金法定估值日历。",
+            "premiumMetadataSource": "https://www.sse.com.cn/disclosure/fund/announcement/c/new/2026-03-19/513100_20260319_RA9X.pdf"
+        },
+        {
             "code": "159660",
             "name": "汇添富",
             "fee": 0.0065,

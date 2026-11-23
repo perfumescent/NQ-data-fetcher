@@ -394,7 +394,7 @@ class RawJobScheduler:
             (quote item 或 None, meta item 或 None, daily items)。
 
         Created: 2026-05
-        易错点: 增量计划不要触碰 history；全量回填才拉 NAV 历史。
+        易错点: 增量计划只保留现有元数据请求的原始响应；全量回填才拉 NAV 历史。
         """
         code = item["code"]
         started_at = perf_counter()
@@ -421,7 +421,10 @@ class RawJobScheduler:
 
             meta_item = None
             if plan.include_meta:
-                metadata = _timed_call(f"Fund {code} metadata", AkShareProvider.get_fund_metadata, code)
+                metadata = _timed_call(
+                    f"Fund {code} metadata", AkShareProvider.get_fund_metadata, code,
+                    include_basic_information=True,
+                )
                 inception_date = item.get("inceptionDate") or _timed_call(
                     f"Fund {code} inceptionDate",
                     AkShareProvider.get_fund_inception_date,

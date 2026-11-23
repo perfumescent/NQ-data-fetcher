@@ -64,6 +64,68 @@ class RawHistoryTests(unittest.TestCase):
             json.dumps(_json_ready(raw), allow_nan=False)
         pd.testing.assert_frame_equal(before, self.frame)
 
+    def test_fund_metadata_preserves_complete_basic_information(self):
+        """
+        验证场外基金常规采集在现有 meta 槽位保留完整东方财富基本信息。
+
+        Args: 无。
+        Returns: None；断言响应包含冲突字段及未知字段，且不需要另一次源请求。
+        Created: 2026-11
+        易错点: 暂停时源可能还带 MAXSG，Fetcher 应保留两个字段供 Server 判断。
+        """
+        source = {
+            "Datas": {
+                "FCODE": "006479",
+                "SGZT": "暂停申购",
+                "MAXSG": "10",
+                "DWJZ": "7.1092",
+                "FSRQ": "2026-11-19",
+                "RZDF": "-2.18",
+                "UnknownField": [1, None],
+            },
+            "ErrCode": 0,
+        }
+        config = {"code": "006479", "name": "广发C", "inceptionDate": "2018-08-15"}
+        plan = RawJobScheduler.incremental_plan()
+        with (
+            patch("src.providers.akshare_api.session.get") as get,
+            patch("src.jobs.schedulers.AkShareProvider.get_fund_estimate_direct", return_value=None),
+        ):
+            get.return_value.status_code = 200
+            get.return_value.text = 'var syl_1n = "10.5";'
+            get.return_value.json.return_value = source
+            quote, meta, history = RawJobScheduler._fetch_fund_raw(config, plan)
+        self.assertEqual(get.call_count, 2)
+        self.assertIsNone(quote)
+        self.assertEqual(history, [])
+        payload = _json_ready(meta["rawPayload"])
+        self.assertEqual(payload["config"], config)
+        self.assertEqual(payload["metadata"]["eastmoneyBasicInformation"], source)
+        self.assertEqual(payload["metadata"]["yearChange"], 10.5)
+        self.assertEqual(payload["_sources"]["metadata"]["eastmoneyBasicInformation"], "eastmoney")
+
+    def test_fund_metadata_marks_unavailable_basic_information(self):
+        """
+        验证东方财富响应失败时仍发送元数据和空的源响应标记。
+
+        Args: 无。
+        Returns: None；断言区分失败和旧 Fetcher 从未提供字段。
+        Created: 2026-11
+        易错点: 响应取不到时用 JSON null，Server 据此将当期限额标为未知。
+        """
+        config = {"code": "006479", "name": "广发C", "inceptionDate": "2018-08-15"}
+        plan = RawJobScheduler.incremental_plan()
+        with (
+            patch("src.providers.akshare_api.session.get") as get,
+            patch("src.jobs.schedulers.AkShareProvider.get_fund_estimate_direct", return_value=None),
+        ):
+            get.return_value.status_code = 200
+            get.return_value.text = 'var syl_1n = "10.5";'
+            get.return_value.json.side_effect = ValueError("non-JSON response")
+            _, meta, _ = RawJobScheduler._fetch_fund_raw(config, plan)
+        metadata = _json_ready(meta["rawPayload"]["metadata"])
+        self.assertEqual(metadata, {"yearChange": 10.5, "eastmoneyBasicInformation": None})
+
     def test_backfill_preserves_same_format_and_all_rows(self):
         """
         验证按日拆包不改变源格式或过滤价格缺失记录。
